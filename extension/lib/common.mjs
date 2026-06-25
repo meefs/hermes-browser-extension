@@ -63,7 +63,7 @@ This v0.1 extension is read-only: answer using the active tab, selected text, pa
 
 // Allow an optional quote after the key and before the value so secrets in
 // quoted JSON/config are redacted, not just bare key=value assignments.
-const SECRET_ASSIGNMENT_RE = /\b(api[_-]?key|access[_-]?token|auth[_-]?token|password|passwd|secret|private[_-]?key)\b["'`]?\s*[:=]\s*["'`]?([^\s'"`;&]+)/gi;
+const SECRET_ASSIGNMENT_RE = /\b(api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|session[_-]?token|client[_-]?secret|aws[_-]?secret[_-]?access[_-]?key|secret[_-]?access[_-]?key|password|passwd|secret|private[_-]?key)\b["'`]?\s*[:=]\s*["'`]?([^\s'"`;&]+)/gi;
 const BEARER_RE = /\bBearer\s+[^\s'"`;&]+/gi;
 const OPENAI_STYLE_RE = new RegExp('\\bsk-[A-Za-z0-9_\\-]{12,}\\b', 'g');
 const STRIPE_KEY_RE = /\b[sr]k_(?:live|test)_[0-9A-Za-z]{16,}\b/g;
@@ -954,6 +954,17 @@ export function appendOpenAiChunkText(event = {}, finalText = '') {
 
 export function encodeSessionId(sessionId = DEFAULT_SETTINGS.sessionId) {
   return encodeURIComponent(String(sessionId || DEFAULT_SETTINGS.sessionId).trim() || DEFAULT_SETTINGS.sessionId);
+}
+
+// Build the error message for a failed /api/browser-extension/pair/start call.
+// A 404 means this Hermes install has no pairing route at all — true of every
+// CLI Gateway release as of this writing; only Hermes Desktop implements
+// pairing. If a future Gateway release adds the route, revisit this branch.
+export function pairingFailureMessage(status, payload) {
+  if (status === 404) {
+    return "Automatic pairing isn't available on this Hermes installation yet. Use Manual setup with your Gateway URL and token instead.";
+  }
+  return payload?.error?.message || payload?.error || `Pairing failed (${status})`;
 }
 
 export function shouldStopSessionPaging({ rowCount = 0, offset = 0, total = 0, hasMore = false } = {}) {

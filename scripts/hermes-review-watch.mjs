@@ -145,22 +145,31 @@ export async function runReviewWatch(rawEnv = process.env) {
   const targets = await listOpenTargets({ repo, token });
   const pending = targets.filter((target) => shouldReviewTarget(target, state)).slice(0, maxTargets);
   const completed = [];
+  const failed = [];
 
   for (const target of pending) {
-    const result = await reviewTarget({ repo, target, token, env, dryRun });
-    completed.push({ target, result });
-    if (!dryRun) state[stateKey(target)] = reviewTargetSignature(target);
+    try {
+      const result = await reviewTarget({ repo, target, token, env, dryRun });
+      completed.push({ target, result });
+      if (!dryRun) state[stateKey(target)] = reviewTargetSignature(target);
+    } catch (error) {
+      failed.push({ target, error: error?.message || String(error) });
+      console.error(`failed ${target.kind} #${target.number}: ${error?.message || String(error)}`);
+    }
   }
 
   if (!dryRun && completed.length) saveState(stateFile, state);
-  return completed;
+  return { completed, failed };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  runReviewWatch().then((completed) => {
-    if (!completed.length) return;
+  runReviewWatch().then(({ completed, failed }) => {
     for (const item of completed) {
       console.log(`${item.result.action} ${item.target.kind} #${item.target.number}`);
+    }
+    if (failed.length) {
+      console.error(`Hermes review failed for ${failed.length} target${failed.length === 1 ? '' : 's'}.`);
+      process.exitCode = 1;
     }
   }).catch((error) => {
     console.error(error?.stack || error?.message || String(error));

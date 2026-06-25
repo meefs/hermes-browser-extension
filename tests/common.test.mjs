@@ -29,6 +29,7 @@ import {
   normalizeHermesProfiles,
   normalizeHermesSessions,
   normalizeHermesSkills,
+  pairingFailureMessage,
   redactSensitiveText,
   renderMarkdown,
   skillCommandForName,
@@ -85,7 +86,23 @@ test('redactSensitiveText masks provider token shapes and quoted secret values',
   const jsonOutput = redactSensitiveText(`{"api_key": "${quotedSecret}"}`);
   assert.doesNotMatch(jsonOutput, new RegExp(quotedSecret));
   assert.match(jsonOutput, /api_key=\[REDACTED_SECRET\]/);
+
+  const compoundOutput = redactSensitiveText(`{"client_secret":"${quotedSecret}","aws_secret_access_key":"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY","refresh_token":"refresh-${quotedSecret}"}`);
+  assert.doesNotMatch(compoundOutput, /wJalrXUtnFEMI/);
+  assert.doesNotMatch(compoundOutput, /refresh-abc123/);
+  assert.match(compoundOutput, /client_secret=\[REDACTED_SECRET\]/);
+  assert.match(compoundOutput, /aws_secret_access_key=\[REDACTED_SECRET\]/);
+  assert.match(compoundOutput, /refresh_token=\[REDACTED_SECRET\]/);
+
   assert.equal(redactSensitiveText('The quick brown fox jumps over the lazy dog.'), 'The quick brown fox jumps over the lazy dog.');
+});
+
+test('pairingFailureMessage explains a missing pairing route instead of a bare 404', () => {
+  const message = pairingFailureMessage(404, { error: '404: Not Found' });
+  assert.match(message, /Manual setup/);
+  assert.doesNotMatch(message, /404: Not Found/);
+  assert.equal(pairingFailureMessage(403, { error: 'forbidden' }), 'forbidden');
+  assert.equal(pairingFailureMessage(503, {}), 'Pairing failed (503)');
 });
 
 test('clampText preserves short text and clearly marks truncation', () => {

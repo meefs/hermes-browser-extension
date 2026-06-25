@@ -30,6 +30,7 @@ import {
   normalizeGatewayMode,
   normalizeGatewayUrl,
   normalizeReasoningEffort,
+  pairingFailureMessage,
   reasoningEffortShortLabel,
   renderMarkdown,
   safeTab,
@@ -2125,7 +2126,7 @@ function collectPageContextFallback(options = {}) {
       .replace(/\bAIza[0-9A-Za-z_\-]{35}\b/g, '[REDACTED_SECRET]')
       .replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, '[REDACTED_SECRET]')
       .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[REDACTED_JWT]')
-      .replace(/\b(api[_-]?key|access[_-]?token|auth[_-]?token|password|passwd|secret|private[_-]?key)\b["'`]?\s*[:=]\s*["'`]?([^\s'"`;&]+)/gi, (_match, key) => `${key}=[REDACTED_SECRET]`);
+      .replace(/\b(api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|session[_-]?token|client[_-]?secret|aws[_-]?secret[_-]?access[_-]?key|secret[_-]?access[_-]?key|password|passwd|secret|private[_-]?key)\b["'`]?\s*[:=]\s*["'`]?([^\s'"`;&]+)/gi, (_match, key) => `${key}=[REDACTED_SECRET]`);
   }
   function pageMeta() {
     const description = document.querySelector('meta[name="description"], meta[property="og:description"]')?.content || '';
@@ -2672,7 +2673,7 @@ async function connectToHermes() {
       }),
     });
     const payload = await readJsonResponse(start);
-    if (!start.ok) throw new Error(payload?.error?.message || payload?.error || `Pairing failed (${start.status})`);
+    if (!start.ok) throw new Error(pairingFailureMessage(start.status, payload));
 
     if (payload.token) {
       settings.apiKey = payload.token;
@@ -2746,7 +2747,7 @@ async function askHermes(userText, turnAttachments = [...attachments]) {
     updateConnectionPrompt();
     addMessage('system', isRemoteWsMode()
       ? 'Remote setup needed: enter your dashboard https URL in Settings and sign in to that dashboard in a browser tab. Your draft is still in the composer.'
-      : 'Connection setup needed: click Connect to Hermes, approve in the local Hermes approval page, then send again. Your draft is still in the composer.');
+      : 'Connection setup needed: click Connect to Hermes if your install supports pairing, or open Settings and use Manual setup with your Gateway URL and token. Your draft is still in the composer.');
     els.connectButton.focus();
     return false;
   }

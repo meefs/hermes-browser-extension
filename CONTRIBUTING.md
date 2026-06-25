@@ -21,7 +21,7 @@ Open an issue before adding permissions like:
 - `bookmarks`
 - browser click/type/form-submit/control behavior
 
-Hermes Browser Extension connects to a real local Hermes runtime. Treat API key handling, browser permissions, page context capture, and prompt-injection boundaries as security-sensitive.
+Hermes Browser Extension connects to a real local or remote Hermes runtime. Treat API key handling, browser permissions, page context capture, and prompt-injection boundaries as security-sensitive.
 
 ## Relationship to Hermes Agent
 
