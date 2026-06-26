@@ -60,18 +60,18 @@
 
 :root {
   color-scheme: light dark;
-  --hermes-blue: #0000f2;
-  --hermes-blue-deep: #0000c8;
-  --hermes-paper: #ffffff;
-  --hermes-fg: #f5f5f5;
-  --hermes-ink: #0000f2;
-  --hermes-accent: #edff45;
-  --hermes-bg-rgb: 0, 0, 242;
-  --hermes-panel-rgb: 0, 0, 242;
-  --hermes-paper-rgb: 255, 255, 255;
-  --hermes-fg-rgb: 245, 245, 245;
-  --hermes-ink-rgb: 0, 0, 242;
-  --hermes-accent-rgb: 237, 255, 69;
+  --hermes-blue: #0505e8;
+  --hermes-blue-deep: #03038f;
+  --hermes-paper: #fbfcff;
+  --hermes-fg: #f8faff;
+  --hermes-ink: #0505e8;
+  --hermes-accent: #f8faff;
+  --hermes-bg-rgb: 5, 5, 232;
+  --hermes-panel-rgb: 5, 5, 232;
+  --hermes-paper-rgb: 251, 252, 255;
+  --hermes-fg-rgb: 248, 250, 255;
+  --hermes-ink-rgb: 5, 5, 232;
+  --hermes-accent-rgb: 248, 250, 255;
   --hermes-shadow-rgb: 0, 0, 0;
   --hermes-menu-bg: #102d5f;
   --hermes-line: rgba(var(--hermes-ink-rgb), 0.28);
@@ -110,35 +110,35 @@
 }
 
 html[data-hermes-theme="nous"][data-hermes-mode="dark"] {
-  --hermes-blue: #0000f2;
-  --hermes-blue-deep: #0000c8;
-  --hermes-paper: #ffffff;
-  --hermes-fg: #f5f5f5;
-  --hermes-ink: #0000f2;
-  --hermes-accent: #edff45;
-  --hermes-bg-rgb: 0, 0, 242;
-  --hermes-panel-rgb: 0, 0, 242;
-  --hermes-paper-rgb: 255, 255, 255;
-  --hermes-fg-rgb: 245, 245, 245;
-  --hermes-ink-rgb: 0, 0, 242;
-  --hermes-accent-rgb: 237, 255, 69;
-  --hermes-menu-bg: #102d5f;
+  --hermes-blue: #0505e8;
+  --hermes-blue-deep: #03038f;
+  --hermes-paper: #fbfcff;
+  --hermes-fg: #f8faff;
+  --hermes-ink: #0505e8;
+  --hermes-accent: #f8faff;
+  --hermes-bg-rgb: 5, 5, 232;
+  --hermes-panel-rgb: 5, 5, 232;
+  --hermes-paper-rgb: 251, 252, 255;
+  --hermes-fg-rgb: 248, 250, 255;
+  --hermes-ink-rgb: 5, 5, 232;
+  --hermes-accent-rgb: 248, 250, 255;
+  --hermes-menu-bg: #06115f;
 }
 
 html[data-hermes-theme="nous"][data-hermes-mode="light"] {
-  --hermes-blue: #edf3ff;
-  --hermes-blue-deep: #dbe8ff;
+  --hermes-blue: #f4f7ff;
+  --hermes-blue-deep: #e3ebff;
   --hermes-paper: #ffffff;
-  --hermes-fg: #0000f2;
-  --hermes-ink: #0000f2;
-  --hermes-accent: #b9d2ff;
-  --hermes-bg-rgb: 237, 243, 255;
+  --hermes-fg: #03038f;
+  --hermes-ink: #0505e8;
+  --hermes-accent: #dbe6ff;
+  --hermes-bg-rgb: 244, 247, 255;
   --hermes-panel-rgb: 255, 255, 255;
   --hermes-paper-rgb: 255, 255, 255;
-  --hermes-fg-rgb: 0, 0, 242;
-  --hermes-ink-rgb: 0, 0, 242;
-  --hermes-accent-rgb: 185, 210, 255;
-  --hermes-menu-bg: #f7faff;
+  --hermes-fg-rgb: 3, 3, 143;
+  --hermes-ink-rgb: 5, 5, 232;
+  --hermes-accent-rgb: 219, 230, 255;
+  --hermes-menu-bg: #f9fbff;
 }
 
 html[data-hermes-theme="midnight"][data-hermes-mode="dark"] {

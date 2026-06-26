@@ -4,19 +4,22 @@ import {
   HERMES_BROWSER_SYSTEM_PROMPT,
   MODEL_EFFORTS,
   appendOpenAiChunkText,
+  autoSessionTitleFromText,
   buildAudioTranscriptionBody,
   buildHermesModelOptions,
   buildHermesPrompt,
   clampText,
-  compareVersionStrings,
+  connectionStateForGateway,
   encodeSessionId,
   estimateContextWindow,
   estimateTokens,
   extractAssistantText,
   formatContextMeter,
+  formatUpdateStatus,
   gatewayConnectionSummary,
   groupModelsForMenu,
   groupSessionsForMenu,
+  isDefaultBrowserSessionTitle,
   isMicrophonePermissionError,
   isModelRuntimeSelectable,
   isRestrictedUrl,
@@ -48,8 +51,9 @@ import {
   DEFAULT_AGENT_PORTS,
   activeAgents,
   discoverLocalAgents,
+  normalizeAgentDiscoveryHost,
+  normalizeAgentDiscoveryScheme,
   parseAgentPortsInput,
-  probeGatewayHealth,
 } from './lib/agent-discovery.mjs';
 import {
   discoverModelsFromRegistry,
@@ -134,6 +138,7 @@ const els = {
   includeTabsInput: $('#includeTabsInput'),
   includePageTextInput: $('#includePageTextInput'),
   includeSelectedTextInput: $('#includeSelectedTextInput'),
+  autoNameSessionsInput: $('#autoNameSessionsInput'),
   transcriptProviderInput: $('#transcriptProviderInput'),
   profileSelect: $('#profileSelect'),
   refreshProfilesButton: $('#refreshProfilesButton'),
@@ -141,6 +146,8 @@ const els = {
   agentList: $('#agentList'),
   refreshAgentsButton: $('#refreshAgentsButton'),
   addCustomAgentButton: $('#addCustomAgentButton'),
+  agentHostInput: $('#agentHostInput'),
+  agentSchemeInput: $('#agentSchemeInput'),
   agentPortsInput: $('#agentPortsInput'),
   agentPickerStatus: $('#agentPickerStatus'),
   themeGrid: $('#themeGrid'),
@@ -175,6 +182,11 @@ let sessionRoutesAvailable = null;
 // /api/ws JSON-RPC socket (the api_server REST/SSE surface is unavailable
 // cross-origin). This holds the live socket + the dashboard-assigned session id.
 let remoteWsConnection = null;
+let connectionProbeStatus = 'connecting';
+let connectionProbeDetail = '';
+let connectionProbeTimer = null;
+let connectionProbeInFlight = false;
+const CONNECTION_PROBE_INTERVAL_MS = 30_000;
 
 // remote-dashboard mode authenticates over the dashboard WebSocket with a
 // first-party ticket; the other modes (local-api, remote-api) use the REST
@@ -187,10 +199,31 @@ function isRemoteMode() {
   return normalizeGatewayMode(settings.gatewayMode) !== 'local-api';
 }
 
+function currentConnectionState() {
+  return connectionStateForGateway({
+    gatewayMode: settings.gatewayMode,
+    gatewayUrl: settings.gatewayUrl,
+    apiKey: settings.apiKey,
+    probeStatus: connectionProbeStatus,
+    remoteWsReadyState: remoteWsConnection?.client?.readyState ?? -1,
+  });
+}
+
 function isConnected() {
-  if (!isRemoteMode()) return Boolean(settings.apiKey);        // local: needs an API key
-  if (isRemoteWsMode()) return isUsableRemoteGatewayUrl(settings.gatewayUrl); // dashboard: needs an https URL
-  return Boolean(settings.apiKey) && isUsableRemoteGatewayUrl(settings.gatewayUrl); // remote API: needs both
+  return currentConnectionState().connected;
+}
+
+function connectionStateTitle(state, summary) {
+  if (state.state === 'connected') return `Connected to ${summary.normalizedUrl}`;
+  if (state.state === 'connecting') return `Checking ${summary.normalizedUrl}`;
+  if (state.state === 'unreachable') return `Gateway unreachable: ${connectionProbeDetail || summary.normalizedUrl}`;
+  return 'Not connected to Hermes';
+}
+
+function markConnectionProbe(status, detail = '') {
+  connectionProbeStatus = status;
+  connectionProbeDetail = detail;
+  updateConnectionPrompt();
 }
 
 function setStatus(kind, title, detail) {
@@ -281,27 +314,43 @@ function applyGatewayMode(mode) {
   renderGatewayModeCards();
 }
 
+async function commitsBehindMainForVersion(latestVersion) {
+  const version = String(latestVersion || '').trim().replace(/^v/i, '');
+  if (!version) return 0;
+  const tag = `v${version}`;
+  try {
+    const cached = (await chrome.storage.local.get(UPDATE_CACHE_KEY))[UPDATE_CACHE_KEY];
+    if (cached?.tag === tag && Number.isFinite(cached.commitsBehind) && Date.now() - Number(cached.checkedAt || 0) < UPDATE_CACHE_TTL_MS) {
+      return Math.max(0, Number(cached.commitsBehind || 0));
+    }
+  } catch {
+    // Cache is best-effort only.
+  }
+  const response = await fetch(`${UPDATE_COMPARE_URL}/${encodeURIComponent(tag)}...main?t=${Date.now()}`, { cache: 'no-store' });
+  if (!response.ok) return 0;
+  const payload = await response.json().catch(() => ({}));
+  const commitsBehind = Math.max(0, Number.parseInt(payload.ahead_by, 10) || 0);
+  try {
+    await chrome.storage.local.set({ [UPDATE_CACHE_KEY]: { tag, commitsBehind, checkedAt: Date.now() } });
+  } catch {
+    // Cache is best-effort only.
+  }
+  return commitsBehind;
+}
+
 async function checkForUpdates() {
   if (!els.checkUpdatesButton) return;
   els.checkUpdatesButton.disabled = true;
   els.checkUpdatesButton.textContent = 'Checking...';
-  renderVersionInfo('Checking GitHub for the latest public version...');
+  renderVersionInfo('Checking GitHub for the latest public version and commit count...');
   try {
     const response = await fetch(`${UPDATE_PACKAGE_URL}?t=${Date.now()}`, { cache: 'no-store' });
     if (!response.ok) throw new Error(`GitHub version check failed (${response.status})`);
     const payload = await response.json();
     const latest = String(payload.version || '').trim();
     if (!latest) throw new Error('Latest package version was missing.');
-    const comparison = compareVersionStrings(latest, CURRENT_EXTENSION_VERSION);
-    if (comparison > 0) {
-      renderVersionInfo(`Update available: v${latest}. Pull latest, run npm run build, then reload the unpacked dist/ folder.`);
-      return;
-    }
-    if (comparison < 0) {
-      renderVersionInfo(`This build is ahead of main: v${CURRENT_EXTENSION_VERSION} installed, v${latest} on GitHub.`);
-      return;
-    }
-    renderVersionInfo(`You're up to date on v${CURRENT_EXTENSION_VERSION}.`);
+    const commitsBehind = await commitsBehindMainForVersion(latest);
+    renderVersionInfo(formatUpdateStatus({ latestVersion: latest, currentVersion: CURRENT_EXTENSION_VERSION, commitsBehind }));
   } catch (error) {
     renderVersionInfo(`${error?.message || String(error)} Open ${REPO_URL} for manual update instructions.`);
   } finally {
@@ -311,19 +360,28 @@ async function checkForUpdates() {
 }
 
 function updateConnectionPrompt() {
-  const connected = isConnected();
+  const state = currentConnectionState();
+  const connected = state.connected;
   const summary = currentGatewaySummary();
   els.connectPanel.hidden = connected;
   els.connectionPill.textContent = '●';
-  els.connectionPill.className = `connection-pill ${connected ? 'ok' : 'warn'}`;
-  els.connectionPill.title = connected ? `Connected to ${summary.normalizedUrl}` : 'Not connected to Hermes';
-  els.connectionPill.setAttribute('aria-label', connected ? 'Hermes connected' : 'Hermes not connected');
+  els.connectionPill.className = `connection-pill ${state.pillClass || 'warn'}`;
+  els.connectionPill.title = connectionStateTitle(state, summary);
+  els.connectionPill.setAttribute('aria-label', connected ? 'Hermes connected' : `Hermes ${state.state}`);
   if (!connected) {
-    els.sendButton.textContent = 'Connect first';
-    if (isRemoteWsMode()) {
-      setStatus('warn', 'Set a remote dashboard', 'Enter your dashboard https URL in Settings and sign in to it in a browser tab.');
+    if (state.state === 'connecting') {
+      els.sendButton.textContent = 'Checking...';
+      setStatus('warn', 'Checking Hermes', `${summary.title}: ${summary.normalizedUrl}`);
+    } else if (state.state === 'unreachable') {
+      els.sendButton.textContent = 'Reconnect';
+      setStatus('error', 'Gateway unreachable', connectionProbeDetail || `${summary.title} is not responding. Start Hermes Desktop/Gateway, then reconnect.`);
     } else {
-      setStatus('warn', 'Connect Hermes', `${summary.title}. Click Connect to Hermes or use Manual setup.`);
+      els.sendButton.textContent = 'Connect first';
+      if (isRemoteWsMode()) {
+        setStatus('warn', 'Set a remote dashboard', 'Enter your dashboard https URL in Settings and sign in to it in a browser tab.');
+      } else {
+        setStatus('warn', 'Connect Hermes', `${summary.title}. Click Connect to Hermes or use Manual setup.`);
+      }
     }
   } else {
     els.sendButton.textContent = sending ? 'Queue message' : 'Ask Hermes';
@@ -791,6 +849,9 @@ const TEXT_ATTACHMENT_LIMIT = 12_000;
 const IMAGE_ATTACHMENT_TOKEN_ESTIMATE = 1_200;
 const BROWSER_IMAGE_UPLOAD_ENDPOINT = '/api/browser-extension/uploads/images';
 const UPDATE_PACKAGE_URL = 'https://raw.githubusercontent.com/abundantbeing/hermes-browser-extension/main/package.json';
+const UPDATE_COMPARE_URL = 'https://api.github.com/repos/abundantbeing/hermes-browser-extension/compare';
+const UPDATE_CACHE_KEY = 'hermesBrowserUpdateCheck';
+const UPDATE_CACHE_TTL_MS = 60 * 60 * 1000;
 const REPO_URL = 'https://github.com/abundantbeing/hermes-browser-extension';
 const runtimeManifest = globalThis.chrome?.runtime?.getManifest?.() || {};
 const CURRENT_EXTENSION_VERSION = normalizeExtensionVersion(runtimeManifest, els.versionLabel?.textContent);
@@ -800,8 +861,8 @@ const APPEARANCE_THEMES = Object.freeze([
   {
     value: 'nous',
     name: 'Nous',
-    description: 'Glass neutrals with Nous blue accents',
-    preview: { bg: '#edf3ff', panel: '#ffffff', text: '#202331', muted: '#65677a', accent: '#9dbdff' },
+    description: 'Ink blue with soft-white Desktop accents',
+    preview: { bg: '#0505e8', panel: '#0505e8', text: '#f8faff', muted: '#dbe6ff', accent: '#f8faff' },
   },
   {
     value: 'midnight',
@@ -1689,13 +1750,12 @@ async function applySelectedProfile(profileName = '') {
 }
 
 // ---------------------------------------------------------------------------
-// Agent picker — multi-gateway discovery (v0.1.3 tweak)
+// Agent picker — multi-gateway discovery (v0.1.4)
 //
-// Some Hermes installs expose multiple local API gateways on adjacent ports.
-// This picker probes /health across a configurable localhost port range and
-// lets the user switch the active gateway URL in one click. It complements the
-// profile selector without relying on every gateway supporting profile switch
-// APIs yet.
+// Hermes installs can expose multiple API gateways on adjacent ports, either on
+// localhost or a private remote host (for example a Tailscale hostname). The
+// picker probes /health without Authorization first, then only uses the token
+// after the endpoint identifies itself as Hermes.
 // ---------------------------------------------------------------------------
 
 let discoveredAgents = [];
@@ -1706,9 +1766,15 @@ function getAgentPorts() {
   return [...DEFAULT_AGENT_PORTS];
 }
 
-async function persistAgentPorts(ports) {
-  settings = { ...settings, agentPorts: ports };
+async function persistAgentDiscoverySettings({ ports = getAgentPorts(), host = settings.agentDiscoveryHost, scheme = settings.agentDiscoveryScheme } = {}) {
+  settings = {
+    ...settings,
+    agentPorts: ports,
+    agentDiscoveryHost: normalizeAgentDiscoveryHost(host || DEFAULT_SETTINGS.agentDiscoveryHost),
+    agentDiscoveryScheme: normalizeAgentDiscoveryScheme(scheme || DEFAULT_SETTINGS.agentDiscoveryScheme),
+  };
   await chrome.storage.local.set({ hermesBrowserSettings: settings });
+  syncSettingsForm();
 }
 
 function renderAgentList(agents = discoveredAgents) {
@@ -1717,7 +1783,7 @@ function renderAgentList(agents = discoveredAgents) {
   if (!agents.length) {
     const empty = document.createElement('p');
     empty.className = 'hint';
-    empty.textContent = 'No agents scanned yet. Click "Scan local agents".';
+    empty.textContent = 'No agents scanned yet. Click "Scan agents".';
     els.agentList.appendChild(empty);
     return;
   }
@@ -1762,24 +1828,35 @@ async function loadAgents({ quiet = false } = {}) {
   if (!els.agentList) return;
   const ports = getAgentPorts();
   if (!ports.length) {
-    els.agentList.innerHTML = '<p class="hint">No agent ports configured. Add a custom URL or set ports in the field below.</p>';
+    els.agentList.innerHTML = '<p class="hint">No agent ports configured. Set ports in the field below.</p>';
     return;
   }
-  if (els.agentPickerStatus) els.agentPickerStatus.textContent = `Scanning ${ports.length} port${ports.length === 1 ? '' : 's'}...`;
+  let host;
+  let scheme;
+  try {
+    host = normalizeAgentDiscoveryHost(els.agentHostInput?.value || settings.agentDiscoveryHost || DEFAULT_SETTINGS.agentDiscoveryHost);
+    scheme = normalizeAgentDiscoveryScheme(els.agentSchemeInput?.value || settings.agentDiscoveryScheme || DEFAULT_SETTINGS.agentDiscoveryScheme);
+    await persistAgentDiscoverySettings({ ports, host, scheme });
+  } catch (error) {
+    if (els.agentPickerStatus) els.agentPickerStatus.textContent = error?.message || String(error);
+    setStatus('warn', 'Agent host invalid', error?.message || String(error));
+    return;
+  }
+  if (els.agentPickerStatus) els.agentPickerStatus.textContent = `Scanning ${scheme}://${host} across ${ports.length} port${ports.length === 1 ? '' : 's'}...`;
   const key = settings.apiKey || '';
-  discoveredAgents = await discoverLocalAgents({ ports, apiKey: key });
+  discoveredAgents = await discoverLocalAgents({ ports, host, scheme, apiKey: key });
   const healthy = activeAgents(discoveredAgents);
   renderAgentList(discoveredAgents);
   if (els.agentPickerStatus) {
     if (healthy.length === 0) {
-      els.agentPickerStatus.textContent = `Scanned ${ports.length} ports — no Hermes agents online.`;
+      els.agentPickerStatus.textContent = `Scanned ${scheme}://${host} across ${ports.length} ports — no Hermes agents online.`;
     } else if (healthy.length === 1) {
-      els.agentPickerStatus.textContent = `1 agent online at port ${healthy[0].port}.`;
+      els.agentPickerStatus.textContent = `1 agent online at ${scheme}://${host}:${healthy[0].port}.`;
     } else {
-      els.agentPickerStatus.textContent = `${healthy.length} agents online across ${ports.length} ports scanned.`;
+      els.agentPickerStatus.textContent = `${healthy.length} agents online on ${scheme}://${host} across ${ports.length} ports scanned.`;
     }
   }
-  if (!quiet) setStatus('ok', 'Local agents scanned', `${healthy.length} of ${ports.length} ports responding to /health`);
+  if (!quiet) setStatus('ok', 'Agents scanned', `${healthy.length} of ${ports.length} ${scheme}://${host} ports responding as Hermes`);
 }
 
 async function switchAgentGateway(agent) {
@@ -1934,6 +2011,70 @@ async function loadSessions({ quiet = false } = {}) {
     updateSessionLabel();
     renderSessionMenu();
     if (!quiet) setStatus('warn', 'Session sync failed', error?.message || String(error));
+  }
+}
+
+async function renameHermesSessionTitle(sessionId, title, { quiet = false } = {}) {
+  const nextTitle = String(title || '').trim();
+  if (!sessionId || !nextTitle) return false;
+  if (isRemoteWsMode()) {
+    // Dashboard WS currently exposes create/resume/list/history but not rename.
+    availableSessions = availableSessions.map((session) => (session.id === sessionId ? { ...session, title: nextTitle } : session));
+    settings = { ...settings, sessionTitle: nextTitle };
+    await chrome.storage.local.set({ hermesBrowserSettings: settings });
+    updateSessionLabel();
+    renderSessionMenu();
+    if (!quiet) setStatus('warn', 'Session title saved locally', 'Remote dashboard rename RPC is not available yet.');
+    return false;
+  }
+  if (!settings.apiKey) return false;
+  const response = await apiFetch(`/api/sessions/${encodeSessionId(sessionId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ title: nextTitle }),
+  });
+  const payload = await readJsonResponse(response);
+  if (!response.ok) throw new Error(payload?.error?.message || payload?.error || `Session rename failed (${response.status})`);
+  const updated = normalizeHermesSessions({ data: [payload.session || payload] })[0] || { id: sessionId, title: nextTitle, source: settings.sessionSource };
+  availableSessions = normalizeHermesSessions({ data: [updated, ...availableSessions.filter((session) => session.id !== sessionId)] });
+  settings = { ...settings, sessionTitle: updated.title || nextTitle };
+  await chrome.storage.local.set({ hermesBrowserSettings: settings });
+  updateSessionLabel();
+  renderSessionMenu();
+  if (!quiet) setStatus('ok', 'Session title updated', settings.sessionTitle);
+  return true;
+}
+
+async function maybeRenameCurrentSessionTitle(previousSettings = {}, nextTitle = settings.sessionTitle) {
+  const cleanTitle = String(nextTitle || '').trim() || DEFAULT_SETTINGS.sessionTitle;
+  const sessionId = settings.sessionId || previousSettings.sessionId;
+  const current = availableSessions.find((session) => session.id === sessionId);
+  const previousTitle = String(current?.title || previousSettings.sessionTitle || '').trim();
+  if (!sessionId || !cleanTitle || cleanTitle === previousTitle) return false;
+  try {
+    return await renameHermesSessionTitle(sessionId, cleanTitle);
+  } catch (error) {
+    setStatus('warn', 'Could not rename session', error?.message || String(error));
+    return false;
+  }
+}
+
+function autoTitleForCurrentTurn(userText = '') {
+  if (settings.autoNameSessions === false || !String(userText || '').trim()) return '';
+  if (messages.some((message) => message.role === 'user' && String(message.content || '').trim())) return '';
+  const current = availableSessions.find((session) => session.id === settings.sessionId);
+  const currentTitle = current?.title || settings.sessionTitle || DEFAULT_SETTINGS.sessionTitle;
+  if (!isDefaultBrowserSessionTitle(currentTitle)) return '';
+  return autoSessionTitleFromText(userText);
+}
+
+async function maybeAutoNameCurrentSession(title = '') {
+  const cleanTitle = String(title || '').trim();
+  if (!cleanTitle) return false;
+  try {
+    return await renameHermesSessionTitle(settings.sessionId, cleanTitle, { quiet: true });
+  } catch (error) {
+    setStatus('warn', 'Auto-name skipped', error?.message || String(error));
+    return false;
   }
 }
 
@@ -2165,6 +2306,9 @@ async function loadSettings() {
     fastMode: Boolean(settings.fastMode),
     reasoningEffort: migrateDesktopOptionDefaults ? DEFAULT_SETTINGS.reasoningEffort : normalizeReasoningEffort(settings.reasoningEffort),
     modelOptionsVersion: DEFAULT_SETTINGS.modelOptionsVersion,
+    agentDiscoveryHost: normalizeAgentDiscoveryHost(settings.agentDiscoveryHost || DEFAULT_SETTINGS.agentDiscoveryHost),
+    agentDiscoveryScheme: normalizeAgentDiscoveryScheme(settings.agentDiscoveryScheme || DEFAULT_SETTINGS.agentDiscoveryScheme),
+    autoNameSessions: settings.autoNameSessions !== false,
     colorMode: normalizeColorMode(settings.colorMode),
     appearanceTheme: normalizeAppearanceTheme(settings.appearanceTheme),
   };
@@ -2201,10 +2345,15 @@ function syncSettingsForm() {
   els.includeTabsInput.checked = Boolean(settings.includeTabs);
   els.includePageTextInput.checked = Boolean(settings.includePageText);
   els.includeSelectedTextInput.checked = Boolean(settings.includeSelectedText);
+  if (els.autoNameSessionsInput) els.autoNameSessionsInput.checked = settings.autoNameSessions !== false;
+  if (els.agentHostInput) els.agentHostInput.value = settings.agentDiscoveryHost || DEFAULT_SETTINGS.agentDiscoveryHost;
+  if (els.agentSchemeInput) els.agentSchemeInput.value = normalizeAgentDiscoveryScheme(settings.agentDiscoveryScheme || DEFAULT_SETTINGS.agentDiscoveryScheme);
+  if (els.agentPortsInput) els.agentPortsInput.value = getAgentPorts().join(',');
   els.transcriptProviderInput.value = settings.transcriptProvider || DEFAULT_SETTINGS.transcriptProvider;
 }
 
 async function saveSettingsFromForm() {
+  const previousSettings = { ...settings };
   const selected = availableModels.find((model) => model.id === settings.model);
   const apiKey = els.apiKeyInput.value.trim();
   // The UI only picks Local vs Remote; for Remote the transport is inferred
@@ -2229,12 +2378,17 @@ async function saveSettingsFromForm() {
     includeTabs: els.includeTabsInput.checked,
     includePageText: els.includePageTextInput.checked,
     includeSelectedText: els.includeSelectedTextInput.checked,
+    autoNameSessions: els.autoNameSessionsInput ? els.autoNameSessionsInput.checked : settings.autoNameSessions !== false,
+    agentDiscoveryHost: normalizeAgentDiscoveryHost(els.agentHostInput?.value || settings.agentDiscoveryHost || DEFAULT_SETTINGS.agentDiscoveryHost),
+    agentDiscoveryScheme: normalizeAgentDiscoveryScheme(els.agentSchemeInput?.value || settings.agentDiscoveryScheme || DEFAULT_SETTINGS.agentDiscoveryScheme),
+    agentPorts: parseAgentPortsInput(els.agentPortsInput?.value || '').length ? parseAgentPortsInput(els.agentPortsInput?.value || '') : getAgentPorts(),
     transcriptProvider: els.transcriptProviderInput.value.trim() || DEFAULT_SETTINGS.transcriptProvider,
     colorMode: normalizeColorMode(settings.colorMode),
     appearanceTheme: normalizeAppearanceTheme(settings.appearanceTheme),
   };
   applyAppearanceSettings();
   await chrome.storage.local.set({ hermesBrowserSettings: settings });
+  await maybeRenameCurrentSessionTitle(previousSettings, settings.sessionTitle);
   syncSettingsForm();
   updateConnectionPrompt();
 }
@@ -2488,6 +2642,61 @@ async function apiFetch(path, options = {}) {
   });
 }
 
+function stopConnectionProbeLoop() {
+  clearTimeout(connectionProbeTimer);
+  connectionProbeTimer = null;
+}
+
+function scheduleConnectionProbe(delayMs = CONNECTION_PROBE_INTERVAL_MS) {
+  stopConnectionProbeLoop();
+  connectionProbeTimer = setTimeout(() => {
+    probeGatewayLiveness({ quiet: true }).catch(() => {});
+  }, delayMs);
+}
+
+async function probeGatewayLiveness({ quiet = false } = {}) {
+  if (connectionProbeInFlight) return currentConnectionState();
+  const state = currentConnectionState();
+  if (state.state === 'unconfigured') {
+    stopConnectionProbeLoop();
+    updateConnectionPrompt();
+    return state;
+  }
+  if (isRemoteWsMode()) {
+    if (remoteWsConnection?.client?.readyState === 1) {
+      markConnectionProbe('connected', normalizeGatewayUrl(settings.gatewayUrl));
+      scheduleConnectionProbe();
+      return currentConnectionState();
+    }
+    markConnectionProbe(remoteWsConnection?.client?.readyState === 0 ? 'connecting' : 'unreachable', 'Remote dashboard socket is not open.');
+    scheduleConnectionProbe();
+    return currentConnectionState();
+  }
+  connectionProbeInFlight = true;
+  if (!quiet) markConnectionProbe('connecting', normalizeGatewayUrl(settings.gatewayUrl));
+  try {
+    const response = await apiFetch('/health', { method: 'GET', cache: 'no-store' });
+    if (!response.ok) throw new Error(`health returned ${response.status}`);
+    markConnectionProbe('connected', normalizeGatewayUrl(settings.gatewayUrl));
+  } catch (error) {
+    markConnectionProbe('unreachable', `${normalizeGatewayUrl(settings.gatewayUrl)} · ${error?.message || String(error)}`);
+  } finally {
+    connectionProbeInFlight = false;
+    scheduleConnectionProbe();
+  }
+  return currentConnectionState();
+}
+
+function markGatewayReachable(detail = normalizeGatewayUrl(settings.gatewayUrl)) {
+  markConnectionProbe('connected', detail);
+  scheduleConnectionProbe();
+}
+
+function markGatewayUnreachable(error) {
+  markConnectionProbe('unreachable', error?.message || String(error || 'Gateway disconnected'));
+  scheduleConnectionProbe();
+}
+
 async function ensureHermesSession() {
   if (sessionRoutesAvailable === false) return false;
   const sessionPath = `/api/sessions/${encodeSessionId(settings.sessionId)}`;
@@ -2680,7 +2889,10 @@ async function ensureRemoteWsClient() {
   }
   const connection = { client, baseUrl, wsSessionId: '' };
   client.on('close', () => {
-    if (remoteWsConnection === connection) remoteWsConnection = null;
+    if (remoteWsConnection === connection) {
+      remoteWsConnection = null;
+      markGatewayUnreachable(new Error('Remote dashboard socket closed'));
+    }
   });
   remoteWsConnection = connection;
   return connection;
@@ -2871,6 +3083,7 @@ async function connectToHermes() {
   settings.gatewayUrl = normalizeGatewayUrl(settings.gatewayUrl || els.gatewayUrlInput.value || DEFAULT_SETTINGS.gatewayUrl);
   settings.gatewayMode = normalizeGatewayMode(settings.gatewayMode || els.gatewayModeInput?.value || DEFAULT_SETTINGS.gatewayMode);
   const summary = currentGatewaySummary();
+  markConnectionProbe('connecting', summary.normalizedUrl);
   els.connectButton.disabled = true;
   els.connectButton.textContent = 'Connecting...';
   els.connectStatus.textContent = `Looking for ${summary.title} at ${summary.normalizedUrl}...`;
@@ -2905,8 +3118,10 @@ async function connectToHermes() {
     await loadSessions({ quiet: true });
     await ensureDefaultBrowserSession({ focus: false });
     els.connectStatus.textContent = 'Connected to Hermes. You can start chatting with page context.';
+    markGatewayReachable(normalizeGatewayUrl(settings.gatewayUrl));
     setStatus('ok', 'Hermes Browser Extension connected', normalizeGatewayUrl(settings.gatewayUrl));
   } catch (error) {
+    markGatewayUnreachable(error);
     els.connectStatus.textContent = `${error?.message || String(error)} Manual setup is still available in settings.`;
     openSettingsDialog();
   } finally {
@@ -2967,6 +3182,7 @@ async function askHermes(userText, turnAttachments = [...attachments]) {
     return false;
   }
 
+  const autoTitle = autoTitleForCurrentTurn(userText);
   sending = true;
   const selectedModel = currentSelectedModel();
   if (selectedModel && !isModelRuntimeSelectable(selectedModel)) {
@@ -3036,9 +3252,11 @@ async function askHermes(userText, turnAttachments = [...attachments]) {
     streamView.flush(finalAnswer);
     messages.push({ role: 'assistant', content: finalAnswer, ts: Date.now() });
     await trimAndSaveMessages();
+    if (autoTitle) await maybeAutoNameCurrentSession(autoTitle);
     await loadSessions({ quiet: true });
     didSend = true;
   } catch (error) {
+    if (!isAbortError(error)) markGatewayUnreachable(error);
     addMessage('system', `Hermes Browser Extension error: ${error?.message || String(error)}`);
   } finally {
     activeAbortController = null;
@@ -3075,6 +3293,7 @@ function flashTestConnectionResult(ok) {
 
 async function testConnection() {
   await saveSettingsFromForm();
+  markConnectionProbe('connecting', normalizeGatewayUrl(settings.gatewayUrl));
   els.testConnectionButton.disabled = true;
   els.testConnectionButton.textContent = 'Testing...';
   els.testConnectionButton.classList.remove('success', 'error');
@@ -3096,6 +3315,7 @@ async function testConnection() {
         // model.options shape varies across gateways; the socket is already proven.
       }
       updateConnectionPrompt();
+      markGatewayReachable(`${normalizeGatewayUrl(settings.gatewayUrl)}${modelNote}`);
       setStatus('ok', 'Remote Hermes dashboard connected', `${normalizeGatewayUrl(settings.gatewayUrl)}${modelNote}`);
       ok = true;
       return;
@@ -3117,8 +3337,10 @@ async function testConnection() {
       hasSessionRoutes ? 'Hermes gateway + session API connected' : 'Hermes gateway connected',
       hasSessionRoutes ? normalizeGatewayUrl(settings.gatewayUrl) : `${normalizeGatewayUrl(settings.gatewayUrl)} - OpenAI-compatible fallback mode`,
     );
+    markGatewayReachable(normalizeGatewayUrl(settings.gatewayUrl));
     ok = true;
   } catch (error) {
+    markGatewayUnreachable(error);
     setStatus('error', 'Hermes gateway test failed', error?.message || String(error));
   } finally {
     els.testConnectionButton.disabled = false;
@@ -3234,12 +3456,23 @@ function bindEvents() {
       setStatus('warn', 'No agent ports', 'Enter at least one port number, e.g. 8642,8643,8644,8645,8646');
       return;
     }
-    persistAgentPorts(ports);
-    loadAgents();
+    persistAgentDiscoverySettings({
+      ports,
+      host: els.agentHostInput?.value || settings.agentDiscoveryHost,
+      scheme: els.agentSchemeInput?.value || settings.agentDiscoveryScheme,
+    }).then(() => loadAgents()).catch((error) => setStatus('warn', 'Agent settings invalid', error?.message || String(error)));
   });
   els.agentPortsInput?.addEventListener('change', () => {
     const ports = parseAgentPortsInput(els.agentPortsInput.value);
-    if (ports.length) persistAgentPorts(ports);
+    if (ports.length) {
+      persistAgentDiscoverySettings({ ports }).catch((error) => setStatus('warn', 'Agent ports invalid', error?.message || String(error)));
+    }
+  });
+  els.agentHostInput?.addEventListener('change', () => {
+    persistAgentDiscoverySettings({ host: els.agentHostInput.value }).catch((error) => setStatus('warn', 'Agent host invalid', error?.message || String(error)));
+  });
+  els.agentSchemeInput?.addEventListener('change', () => {
+    persistAgentDiscoverySettings({ scheme: els.agentSchemeInput.value }).catch((error) => setStatus('warn', 'Agent scheme invalid', error?.message || String(error)));
   });
   els.editModelsButton.addEventListener('click', () => {
     closeFloatingPanels();
@@ -3359,16 +3592,21 @@ function bindEvents() {
   });
   els.settingsForm.addEventListener('submit', async (event) => {
     event.preventDefault();
-    await saveSettingsFromForm();
-    if (settings.apiKey) {
-      await loadModels({ quiet: true });
-      await loadSkills({ quiet: true });
-      await loadProfiles({ quiet: true });
-      await loadSessions({ quiet: true });
-      await ensureDefaultBrowserSession({ focus: false });
+    try {
+      await saveSettingsFromForm();
+      await probeGatewayLiveness({ quiet: false });
+      if (settings.apiKey && isConnected()) {
+        await loadModels({ quiet: true });
+        await loadSkills({ quiet: true });
+        await loadProfiles({ quiet: true });
+        await loadSessions({ quiet: true });
+        await ensureDefaultBrowserSession({ focus: false });
+      }
+      closeSettingsDialog();
+      await refreshContext();
+    } catch (error) {
+      setStatus('warn', 'Settings not saved', error?.message || String(error));
     }
-    closeSettingsDialog();
-    await refreshContext();
   });
   els.composer.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -3457,7 +3695,8 @@ function bindEvents() {
 bindEvents();
 try {
   await loadSettings();
-  if (settings.apiKey) {
+  const state = await probeGatewayLiveness({ quiet: true });
+  if (settings.apiKey && state.connected) {
     await loadModels({ quiet: true });
     await loadSkills({ quiet: true });
     await loadProfiles({ quiet: true });

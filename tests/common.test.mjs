@@ -43,6 +43,10 @@ import {
   shouldSubmitComposerKey,
   summarizeTabs,
   compareVersionStrings,
+  autoSessionTitleFromText,
+  connectionStateForGateway,
+  formatUpdateStatus,
+  isDefaultBrowserSessionTitle,
   isNewerVersion,
   normalizeExtensionVersion,
 } from '../extension/lib/common.mjs';
@@ -452,6 +456,48 @@ test('version helpers compare extension update versions safely', () => {
   assert.equal(isNewerVersion('0.1.1', '0.1.1'), false);
 });
 
+test('formatUpdateStatus reports same-version commits behind main', () => {
+  assert.equal(
+    formatUpdateStatus({ latestVersion: '0.1.3', currentVersion: '0.1.3', commitsBehind: 5 }),
+    'v0.1.3 installed, v0.1.3 latest — but 5 unpulled commits. Pull latest, run npm run build, then reload the unpacked dist/ folder.',
+  );
+  assert.equal(
+    formatUpdateStatus({ latestVersion: '0.1.4', currentVersion: '0.1.3', commitsBehind: 12 }),
+    'Update available: v0.1.4. 12 commits behind. Pull latest, run npm run build, then reload the unpacked dist/ folder.',
+  );
+  assert.equal(
+    formatUpdateStatus({ latestVersion: '0.1.3', currentVersion: '0.1.3', commitsBehind: 0 }),
+    "You're up to date on v0.1.3.",
+  );
+});
+
+test('connectionStateForGateway uses live reachability instead of config presence', () => {
+  assert.deepEqual(
+    connectionStateForGateway({ gatewayMode: 'local-api', gatewayUrl: 'http://127.0.0.1:8642', apiKey: 'secret', probeStatus: 'unreachable' }),
+    { state: 'unreachable', connected: false, pillClass: 'error' },
+  );
+  assert.deepEqual(
+    connectionStateForGateway({ gatewayMode: 'local-api', gatewayUrl: 'http://127.0.0.1:8642', apiKey: 'secret', probeStatus: 'connected' }),
+    { state: 'connected', connected: true, pillClass: 'ok' },
+  );
+  assert.deepEqual(
+    connectionStateForGateway({ gatewayMode: 'remote-dashboard', gatewayUrl: 'https://dash.example.com', remoteWsReadyState: 3 }),
+    { state: 'unreachable', connected: false, pillClass: 'error' },
+  );
+  assert.deepEqual(
+    connectionStateForGateway({ gatewayMode: 'remote-dashboard', gatewayUrl: 'https://dash.example.com', remoteWsReadyState: 1 }),
+    { state: 'connected', connected: true, pillClass: 'ok' },
+  );
+});
+
+test('browser session auto-name helpers identify default titles and summarize first turn', () => {
+  assert.equal(isDefaultBrowserSessionTitle('Hermes Browser Extension'), true);
+  assert.equal(isDefaultBrowserSessionTitle('Hermes Browser Extension · Jun 26, 9:03 PM'), true);
+  assert.equal(isDefaultBrowserSessionTitle('Client QA notes'), false);
+  assert.equal(autoSessionTitleFromText('  can you summarize this page and pull out the launch checklist?  '), 'Summarize this page and pull out the launch checklist');
+  assert.equal(autoSessionTitleFromText('https://example.com\n\nwhat are the SEO issues here?'), 'What are the SEO issues here');
+});
+
 test('YouTube transcript helpers parse ids, providers, timedtext, and prompt text', () => {
   assert.equal(extractYouTubeVideoId('https://www.youtube.com/watch?v=abc123&list=x'), 'abc123');
   assert.equal(extractYouTubeVideoId('https://youtu.be/xyz789'), 'xyz789');
@@ -695,6 +741,49 @@ test('parseAgentPortsInput handles comma, space, and edge cases', async () => {
   assert.deepEqual(parseAgentPortsInput('8642,8642,8642'), [8642]); // dedupe
   assert.deepEqual(parseAgentPortsInput(''), []);
   assert.deepEqual(parseAgentPortsInput('junk,8642,999999,0,-1'), [8642]); // only valid in range
+});
+
+test('normalizeAgentDiscoveryHost accepts trusted hosts and rejects URL paths/userinfo', async () => {
+  const { normalizeAgentDiscoveryHost, normalizeAgentDiscoveryScheme } = await import('../extension/lib/agent-discovery.mjs');
+  assert.equal(normalizeAgentDiscoveryHost('https://macbook.tailnet.ts.net/'), 'macbook.tailnet.ts.net');
+  assert.equal(normalizeAgentDiscoveryHost('127.0.0.1'), '127.0.0.1');
+  assert.equal(normalizeAgentDiscoveryHost('[fd7a:115c:a1e0::1]'), '[fd7a:115c:a1e0::1]');
+  assert.throws(() => normalizeAgentDiscoveryHost('https://user:pass@macbook.tailnet.ts.net'), /userinfo/i);
+  assert.throws(() => normalizeAgentDiscoveryHost('https://macbook.tailnet.ts.net/path'), /path/i);
+  assert.throws(() => normalizeAgentDiscoveryHost('macbook.tailnet.ts.net:8642'), /port/i);
+  assert.equal(normalizeAgentDiscoveryScheme('https'), 'https');
+  assert.equal(normalizeAgentDiscoveryScheme('ftp'), 'http');
+});
+
+test('remote agent discovery does not send Authorization to non-Hermes ports before identity is verified', async () => {
+  const { discoverLocalAgents } = await import('../extension/lib/agent-discovery.mjs');
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  const apiKey = ['secret', 'token'].join('-');
+  try {
+    globalThis.fetch = async (url, init = {}) => {
+      calls.push({ url: String(url), auth: init.headers?.Authorization || '' });
+      if (String(url).includes(':8642') && String(url).endsWith('/health')) {
+        return { ok: true, json: async () => ({ platform: 'not-hermes', version: '1.0.0' }) };
+      }
+      if (String(url).includes(':8643') && String(url).endsWith('/health')) {
+        return { ok: true, json: async () => ({ platform: 'hermes-agent', version: '0.17.0' }) };
+      }
+      if (String(url).includes(':8643') && String(url).endsWith('/v1/models')) {
+        return { ok: true, json: async () => ({ data: [{ id: 'macbook-profile' }] }) };
+      }
+      return { ok: false, json: async () => ({}) };
+    };
+    const agents = await discoverLocalAgents({ ports: [8642, 8643], host: 'macbook.tailnet.ts.net', scheme: 'https', apiKey });
+    assert.equal(agents[0].ok, false, 'non-Hermes service should not be treated as a healthy agent');
+    assert.equal(agents[1].ok, true);
+    assert.equal(agents[1].name, 'macbook-profile');
+    assert.equal(calls.find((call) => call.url.includes(':8642/health'))?.auth || '', '', 'non-Hermes health probe must not receive Authorization');
+    assert.equal(calls.find((call) => call.url.includes(':8643/health'))?.auth || '', '', 'initial Hermes health probe must not receive Authorization');
+    assert.equal(calls.find((call) => call.url.includes(':8643/v1/models'))?.auth, `Bearer ${apiKey}`, 'model probe can receive Authorization after Hermes identity is verified');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('settings dialog render path refreshes appearance theme cards on open', () => {

@@ -46,6 +46,9 @@ export const DEFAULT_SETTINGS = Object.freeze({
   includePageText: true,
   includeSelectedText: true,
   transcriptProvider: 'default',
+  agentDiscoveryHost: '127.0.0.1',
+  agentDiscoveryScheme: 'http',
+  autoNameSessions: true,
   colorMode: 'dark',
   appearanceTheme: 'nous',
   maxTabs: 12,
@@ -298,6 +301,67 @@ export function compareVersionStrings(a = '0.0.0', b = '0.0.0') {
 
 export function isNewerVersion(candidate = '0.0.0', current = '0.0.0') {
   return compareVersionStrings(candidate, current) > 0;
+}
+
+export function formatUpdateStatus({ latestVersion = '0.0.0', currentVersion = '0.0.0', commitsBehind = 0 } = {}) {
+  const latest = String(latestVersion || '').trim().replace(/^v/i, '') || '0.0.0';
+  const current = String(currentVersion || '').trim().replace(/^v/i, '') || '0.0.0';
+  const behind = Math.max(0, Number.parseInt(commitsBehind, 10) || 0);
+  const versionComparison = compareVersionStrings(latest, current);
+  const updateInstructions = 'Pull latest, run npm run build, then reload the unpacked dist/ folder.';
+  if (versionComparison > 0) {
+    const behindNote = behind ? ` ${behind} commit${behind === 1 ? '' : 's'} behind.` : '';
+    return `Update available: v${latest}.${behindNote} ${updateInstructions}`.replace(/\s+/g, ' ').trim();
+  }
+  if (versionComparison < 0) {
+    return `This build is ahead of main: v${current} installed, v${latest} on GitHub.`;
+  }
+  if (behind > 0) {
+    return `v${current} installed, v${latest} latest — but ${behind} unpulled commit${behind === 1 ? '' : 's'}. ${updateInstructions}`;
+  }
+  return `You're up to date on v${current}.`;
+}
+
+export function connectionStateForGateway({
+  gatewayMode = DEFAULT_SETTINGS.gatewayMode,
+  gatewayUrl = DEFAULT_SETTINGS.gatewayUrl,
+  apiKey = '',
+  probeStatus = 'unreachable',
+  remoteWsReadyState = -1,
+} = {}) {
+  const mode = normalizeGatewayMode(gatewayMode);
+  const configured = mode === 'remote-dashboard'
+    ? isUsableRemoteGatewayUrl(gatewayUrl)
+    : Boolean(apiKey) && (mode === 'local-api' || isUsableRemoteGatewayUrl(gatewayUrl));
+  if (!configured) return { state: 'unconfigured', connected: false, pillClass: 'warn' };
+  if (mode === 'remote-dashboard') {
+    if (remoteWsReadyState === 1) return { state: 'connected', connected: true, pillClass: 'ok' };
+    if (remoteWsReadyState === 0 || probeStatus === 'connecting') return { state: 'connecting', connected: false, pillClass: 'warn' };
+    return { state: 'unreachable', connected: false, pillClass: 'error' };
+  }
+  if (probeStatus === 'connected') return { state: 'connected', connected: true, pillClass: 'ok' };
+  if (probeStatus === 'connecting') return { state: 'connecting', connected: false, pillClass: 'warn' };
+  return { state: 'unreachable', connected: false, pillClass: 'error' };
+}
+
+export function isDefaultBrowserSessionTitle(title = '', defaultTitle = DEFAULT_SETTINGS.sessionTitle) {
+  const value = String(title || '').trim();
+  const base = String(defaultTitle || DEFAULT_SETTINGS.sessionTitle).trim();
+  return value === base || value.startsWith(`${base} ·`);
+}
+
+export function autoSessionTitleFromText(value = '', { maxChars = 58 } = {}) {
+  const clean = String(value || '')
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^["'`“”‘’\s]+|["'`“”‘’\s]+$/g, '')
+    .replace(/[?.!,;:]+$/g, '');
+  if (!clean) return '';
+  const lowered = clean.replace(/^(can you|could you|please|pls|hey hermes|hermes)\s+/i, '');
+  const sentence = lowered.split(/(?<=[.!?])\s+/)[0].replace(/[?.!,;:]+$/g, '').trim();
+  const clipped = sentence.length > maxChars ? `${sentence.slice(0, maxChars - 1).trimEnd()}…` : sentence;
+  return clipped ? `${clipped.charAt(0).toUpperCase()}${clipped.slice(1)}` : '';
 }
 
 const MODEL_CONTEXT_FALLBACKS = Object.freeze([
