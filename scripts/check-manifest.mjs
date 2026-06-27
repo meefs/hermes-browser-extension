@@ -8,7 +8,7 @@ const manifestPath = path.join(root, 'extension', 'manifest.json');
 const rootManifestPath = path.join(root, 'manifest.json');
 const distManifestPath = path.join(root, 'dist', 'manifest.json');
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-const rootManifestExists = fs.existsSync(rootManifestPath);
+const rootManifest = fs.existsSync(rootManifestPath) ? JSON.parse(fs.readFileSync(rootManifestPath, 'utf8')) : null;
 const distManifest = fs.existsSync(distManifestPath) ? JSON.parse(fs.readFileSync(distManifestPath, 'utf8')) : null;
 const requiredFiles = [
   manifest.background?.service_worker,
@@ -38,8 +38,8 @@ if (manifest.manifest_version !== 3) errors.push('manifest_version must be 3');
 if (manifest.version !== packageJson.version) {
   errors.push(`extension/manifest.json version ${manifest.version} must match package.json version ${packageJson.version}`);
 }
-if (rootManifestExists) {
-  errors.push('root manifest.json should not exist; it makes the repo root look loadable. Build with npm run build and load generated dist/ instead.');
+if (rootManifest && rootManifest.version !== packageJson.version) {
+  errors.push(`root manifest.json version ${rootManifest.version} must match package.json version ${packageJson.version}`);
 }
 if (distManifest && distManifest.version !== packageJson.version) {
   errors.push(`dist/manifest.json version ${distManifest.version} must match package.json version ${packageJson.version}; run npm run build`);
