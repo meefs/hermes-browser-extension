@@ -76,6 +76,7 @@ import {
 import {
   CONTEXT_SCOPE_MODES,
   DEFAULT_CONTEXT_SCOPE,
+  compactPinnedTitle,
   contextScopeFromTab,
   filterPromptTabs,
   messageStorageKeyForScope,
@@ -185,8 +186,6 @@ const els = {
   colorModeButtons: Array.from(document.querySelectorAll('[data-color-mode]')),
   quickMoreMenu: $('#quickMoreMenu'),
   commandMenuButton: $('#commandMenuButton'),
-  tabPickerButton: $('#tabPickerButton'),
-  tabPickerCount: $('#tabPickerCount'),
   template: $('#messageTemplate'),
 };
 
@@ -481,7 +480,7 @@ function renderContextScopeControls() {
     : 'Hermes follows the active browser tab';
 }
 
-function appendContextScopeMenuButton({ action, label, detail = '', selected = false }) {
+function appendContextScopeMenuButton({ action, label, detail = '', selected = false, parent = els.contextScopeMenu }) {
   const button = document.createElement('button');
   button.type = 'button';
   button.dataset.scopeAction = action;
@@ -491,40 +490,176 @@ function appendContextScopeMenuButton({ action, label, detail = '', selected = f
   const meta = document.createElement('small');
   meta.textContent = selected ? '✓' : detail;
   button.append(text, meta);
-  els.contextScopeMenu.appendChild(button);
+  parent?.appendChild(button);
+  return button;
 }
 
-function renderContextScopeMenu() {
+function promptTabsCount(tabs = currentContext.tabs || []) {
+  return selectedTabs === null ? tabs.length : selectedTabs.length;
+}
+
+function isPromptTabSelected(tab) {
+  if (selectedTabs === null) return true;
+  return selectedTabs.some((candidate) => Number(candidate.id) === Number(tab.id));
+}
+
+function setPromptTabsSelection(nextSelection) {
+  selectedTabs = nextSelection;
+  syncSelectedTabsToContextScope();
+}
+
+function togglePromptTabSelection(tab) {
+  const tabs = currentContext.tabs || [];
+  if (!tab) return;
+  if (selectedTabs === null) {
+    setPromptTabsSelection(tabs.filter((candidate) => Number(candidate.id) !== Number(tab.id)));
+    return;
+  }
+  const exists = selectedTabs.some((candidate) => Number(candidate.id) === Number(tab.id));
+  const next = exists
+    ? selectedTabs.filter((candidate) => Number(candidate.id) !== Number(tab.id))
+    : [...selectedTabs, tab];
+  setPromptTabsSelection(next.length === tabs.length ? null : next);
+}
+
+function currentContextScopeSearchQuery() {
+  return els.contextScopeMenu?.querySelector('.context-scope-search')?.value || '';
+}
+
+function tabMatchesContextScopeQuery(tab, query = '') {
+  const needle = String(query || '').trim().toLowerCase();
+  if (!needle) return true;
+  return [tab.title, tab.url]
+    .map((value) => String(value || '').toLowerCase())
+    .some((value) => value.includes(needle));
+}
+
+function renderContextScopeTabList(query = '') {
+  const list = els.contextScopeMenu?.querySelector('.context-scope-list');
+  if (!list) return;
+  list.innerHTML = '';
+  const tabs = currentContext.tabs || [];
+  const filteredTabs = tabs.filter((tab) => tabMatchesContextScopeQuery(tab, query));
+  for (const tab of filteredTabs) {
+    const isPinned = contextScope.mode === CONTEXT_SCOPE_MODES.PINNED_TAB && Number(tab.id) === Number(contextScope.pinnedTabId);
+    const isActive = Boolean(tab.active);
+    const isIncluded = isPromptTabSelected(tab);
+    const row = document.createElement('div');
+    row.className = 'context-scope-tab-row';
+    appendContextScopeMenuButton({
+      action: `pin-tab:${tab.id}`,
+      label: `Pin: ${compactPinnedTitle(tab.title || tab.url || 'Untitled tab', 88)}`,
+      detail: isPinned ? 'current' : isActive ? 'active' : '',
+      selected: isPinned,
+      parent: row,
+    }).classList.add('context-scope-pin-action');
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'context-scope-include-toggle';
+    toggle.dataset.promptTabToggle = String(tab.id);
+    toggle.setAttribute('aria-pressed', String(isIncluded));
+    toggle.title = isIncluded ? 'Remove this tab from the prompt tab list' : 'Include this tab in the prompt tab list';
+    toggle.textContent = isIncluded ? 'IN' : 'OUT';
+    if (isIncluded) toggle.classList.add('selected');
+    row.appendChild(toggle);
+    list.appendChild(row);
+  }
+  if (!filteredTabs.length) {
+    const empty = document.createElement('p');
+    empty.className = 'context-scope-empty';
+    empty.textContent = 'No matching tabs';
+    list.appendChild(empty);
+  }
+}
+
+function renderContextScopePromptControls(tabs = currentContext.tabs || []) {
+  const section = document.createElement('section');
+  section.className = 'context-scope-prompt-controls';
+
+  const header = document.createElement('div');
+  header.className = 'context-scope-section-head';
+  const title = document.createElement('span');
+  title.textContent = 'Tabs in prompt';
+  const count = document.createElement('small');
+  count.textContent = `${promptTabsCount(tabs)}/${tabs.length}`;
+  header.append(title, count);
+
+  const actions = document.createElement('div');
+  actions.className = 'context-scope-prompt-actions';
+  appendContextScopeMenuButton({
+    action: 'prompt-tabs-all',
+    label: 'Include all tabs',
+    detail: `${tabs.length}`,
+    selected: selectedTabs === null,
+    parent: actions,
+  });
+  appendContextScopeMenuButton({
+    action: 'prompt-tabs-none',
+    label: 'Page only',
+    detail: '0',
+    selected: Array.isArray(selectedTabs) && selectedTabs.length === 0,
+    parent: actions,
+  });
+
+  section.append(header, actions);
+  return section;
+}
+
+function renderContextScopeMenu(query = '', { focusSearch = false } = {}) {
   if (!els.contextScopeMenu) return;
+  const searchQuery = String(query || '');
   els.contextScopeMenu.innerHTML = '';
+
+  const actions = document.createElement('div');
+  actions.className = 'context-scope-actions';
   appendContextScopeMenuButton({
     action: 'follow-active',
     label: 'Follow active tab',
     detail: 'live',
     selected: contextScope.mode !== CONTEXT_SCOPE_MODES.PINNED_TAB,
+    parent: actions,
   });
-  appendContextScopeMenuButton({ action: 'pin-active', label: 'Pin current tab', detail: 'lock' });
+  appendContextScopeMenuButton({ action: 'pin-active', label: 'Pin current tab', detail: 'lock', parent: actions });
   if (contextScope.mode === CONTEXT_SCOPE_MODES.PINNED_TAB) {
-    appendContextScopeMenuButton({ action: 'unlock', label: 'Unlock pinned tab', detail: 'follow' });
+    appendContextScopeMenuButton({ action: 'unlock', label: 'Unlock pinned tab', detail: 'follow', parent: actions });
   }
+  els.contextScopeMenu.appendChild(actions);
+
   const tabs = currentContext.tabs || [];
   if (tabs.length) {
-    for (const tab of tabs.slice(0, 20)) {
-      appendContextScopeMenuButton({
-        action: `pin-tab:${tab.id}`,
-        label: `Pin: ${tab.title || tab.url || 'Untitled tab'}`,
-        detail: Number(tab.id) === Number(contextScope.pinnedTabId) ? 'current' : '',
-        selected: contextScope.mode === CONTEXT_SCOPE_MODES.PINNED_TAB && Number(tab.id) === Number(contextScope.pinnedTabId),
+    els.contextScopeMenu.appendChild(renderContextScopePromptControls(tabs));
+
+    const search = document.createElement('input');
+    search.className = 'context-scope-search';
+    search.type = 'search';
+    search.placeholder = 'Search tabs';
+    search.autocomplete = 'off';
+    search.value = searchQuery;
+    els.contextScopeMenu.appendChild(search);
+
+    const list = document.createElement('div');
+    list.className = 'context-scope-list';
+    list.setAttribute('role', 'listbox');
+    els.contextScopeMenu.appendChild(list);
+    renderContextScopeTabList(searchQuery);
+
+    if (focusSearch) {
+      requestAnimationFrame(() => {
+        search.focus();
+        search.setSelectionRange(search.value.length, search.value.length);
       });
     }
   }
+
   els.contextScopeMenu.hidden = false;
   renderContextScopeControls();
 }
 
 function makePinnedTabSessionTitle(tab = {}) {
-  const title = String(tab.title || tab.pinnedTitle || tab.url || tab.pinnedUrl || '').trim() || 'Pinned browser tab';
-  return `Hermes Browser Extension · ${title.slice(0, 80)}`;
+  const prefix = 'Hermes Browser Extension · ';
+  const maxTitleLength = Math.max(12, 100 - prefix.length);
+  const title = compactPinnedTitle(tab.title || tab.pinnedTitle || tab.url || tab.pinnedUrl || 'Pinned browser tab', maxTitleLength);
+  return `${prefix}${title}`;
 }
 
 async function ensureSessionForActiveScope({ focus = false } = {}) {
@@ -559,6 +694,22 @@ async function applyContextScope(nextScope, { ensureSession = false } = {}) {
 async function pinContextTab(tab) {
   if (!tab?.id) return;
   await applyContextScope(contextScopeFromTab(tab, contextScope), { ensureSession: true });
+}
+
+async function pinContextTabById(tabId) {
+  const id = Number(tabId);
+  if (!Number.isFinite(id)) return;
+  let tab = currentContext.tabs.find((item) => Number(item.id) === id) || null;
+  try {
+    const freshTab = await chrome.tabs.get(id);
+    if (freshTab?.id) tab = safeTab(freshTab);
+  } catch (_error) {
+    // The tab may have closed between render and click. Fall back to the
+    // snapshot from the menu when available so the user does not need a manual
+    // refresh just because the tab list is stale.
+  }
+  if (!tab) throw new Error('Tab is closed or no longer available.');
+  await pinContextTab(tab);
 }
 
 async function unlockContextScope() {
@@ -2131,110 +2282,6 @@ function renderQuickMoreMenu(category = 'all') {
   setQuickCommandMenuOpen(true);
 }
 
-/* ── Tab picker ── */
-function renderTabPicker(filter = '') {
-  if (!els.tabPickerButton || !currentContext?.tabs) return;
-
-  let picker = document.getElementById('tabPicker');
-  if (!picker) {
-    picker = document.createElement('div');
-    picker.id = 'tabPicker';
-    picker.className = 'tab-picker';
-    picker.hidden = true;
-    els.tabPickerButton.parentNode.insertBefore(picker, els.tabPickerButton.nextSibling);
-  }
-
-  const tabs = currentContext.tabs;
-  const lowerFilter = String(filter || '').toLowerCase();
-  const filtered = lowerFilter
-    ? tabs.filter((tab) => (tab.title || '').toLowerCase().includes(lowerFilter) || (tab.url || '').toLowerCase().includes(lowerFilter))
-    : tabs;
-
-  picker.innerHTML = `<input type="search" id="tabPickerSearch" class="tab-picker-search" placeholder="Filter tabs…" spellcheck="false">
-    <div id="tabPickerList" class="tab-picker-list"></div>
-    <div class="tab-picker-actions">
-      <button id="tabPickerSelectAll" type="button">Select All</button>
-      <button id="tabPickerDeselectAll" type="button">Deselect All</button>
-    </div>`;
-
-  const list = picker.querySelector('#tabPickerList');
-  for (const tab of filtered) {
-    const item = document.createElement('button');
-    item.type = 'button';
-    item.className = 'tab-picker-item';
-    const isSelected = selectedTabs === null || selectedTabs.some((candidate) => candidate.id === tab.id);
-    if (isSelected) item.classList.add('selected');
-
-    const checkbox = document.createElement('span');
-    checkbox.className = 'tab-picker-checkbox';
-    checkbox.textContent = isSelected ? '✓' : '';
-
-    const info = document.createElement('span');
-    info.className = 'tab-picker-info';
-
-    const title = document.createElement('div');
-    title.className = 'tab-picker-title';
-    title.textContent = tab.title || 'untitled';
-
-    const url = document.createElement('div');
-    url.className = 'tab-picker-url';
-    url.textContent = tab.url || '';
-
-    info.append(title, url);
-    item.append(checkbox, info);
-    item.dataset.tabId = String(tab.id);
-
-    item.addEventListener('click', () => {
-      if (selectedTabs === null) {
-        selectedTabs = currentContext.tabs.filter((candidate) => candidate.id !== tab.id);
-      } else {
-        const exists = selectedTabs.some((candidate) => candidate.id === tab.id);
-        selectedTabs = exists
-          ? selectedTabs.filter((candidate) => candidate.id !== tab.id)
-          : [...selectedTabs, tab];
-        if (selectedTabs.length === tabs.length) selectedTabs = null;
-      }
-      renderTabPicker(filter);
-      updateTabPickerButton();
-      syncSelectedTabsToContextScope();
-    });
-
-    list.appendChild(item);
-  }
-
-  const searchInput = picker.querySelector('#tabPickerSearch');
-  if (searchInput) {
-    searchInput.value = filter;
-    searchInput.addEventListener('input', (event) => renderTabPicker(event.target.value));
-    searchInput.focus();
-  }
-
-  picker.querySelector('#tabPickerSelectAll')?.addEventListener('click', () => {
-    selectedTabs = null;
-    renderTabPicker(filter);
-    updateTabPickerButton();
-    syncSelectedTabsToContextScope();
-  });
-
-  picker.querySelector('#tabPickerDeselectAll')?.addEventListener('click', () => {
-    selectedTabs = [];
-    renderTabPicker(filter);
-    updateTabPickerButton();
-    syncSelectedTabsToContextScope();
-  });
-
-  picker.hidden = false;
-}
-
-function updateTabPickerButton() {
-  if (!els.tabPickerCount) return;
-  const count = selectedTabs === null ? (currentContext?.tabs?.length || 0) : selectedTabs.length;
-  els.tabPickerCount.textContent = String(count);
-  if (els.tabPickerButton) {
-    els.tabPickerButton.classList.toggle('active', selectedTabs !== null);
-  }
-}
-
 function renderProfiles() {
   if (!els.profileSelect) return;
   const selected = settings.activeProfile || availableProfiles.find((profile) => profile.active)?.name || '';
@@ -3234,7 +3281,6 @@ async function refreshContext() {
   }
   renderContextScopeControls();
   renderContextWindow();
-  updateTabPickerButton();
   return currentContext;
 }
 
@@ -4337,10 +4383,36 @@ function bindEvents() {
     }
     renderContextScopeMenu();
   });
+  els.contextScopeMenu?.addEventListener('input', (event) => {
+    if (!event.target?.matches?.('.context-scope-search')) return;
+    renderContextScopeTabList(event.target.value);
+  });
   els.contextScopeMenu?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const promptToggle = event.target.closest('[data-prompt-tab-toggle]');
+    if (promptToggle) {
+      event.stopPropagation();
+      const tabId = Number(promptToggle.dataset.promptTabToggle);
+      const tab = (currentContext.tabs || []).find((item) => Number(item.id) === tabId);
+      togglePromptTabSelection(tab);
+      renderContextScopeMenu(currentContextScopeSearchQuery(), { focusSearch: true });
+      return;
+    }
+
     const button = event.target.closest('[data-scope-action]');
     if (!button) return;
     const action = button.dataset.scopeAction || '';
+    if (action === 'prompt-tabs-all') {
+      setPromptTabsSelection(null);
+      renderContextScopeMenu(currentContextScopeSearchQuery(), { focusSearch: true });
+      return;
+    }
+    if (action === 'prompt-tabs-none') {
+      setPromptTabsSelection([]);
+      renderContextScopeMenu(currentContextScopeSearchQuery(), { focusSearch: true });
+      return;
+    }
+
     els.contextScopeMenu.hidden = true;
     if (action === 'follow-active' || action === 'unlock') {
       unlockContextScope().catch((error) => setStatus('warn', 'Could not unlock tab scope', error?.message || String(error)));
@@ -4352,8 +4424,7 @@ function bindEvents() {
     }
     if (action.startsWith('pin-tab:')) {
       const tabId = Number(action.slice('pin-tab:'.length));
-      const tab = currentContext.tabs.find((item) => Number(item.id) === tabId);
-      pinContextTab(tab).catch((error) => setStatus('warn', 'Could not pin tab', error?.message || String(error)));
+      pinContextTabById(tabId).catch((error) => setStatus('warn', 'Could not pin tab', error?.message || String(error)));
     }
   });
 
@@ -4367,17 +4438,6 @@ function bindEvents() {
     renderQuickMoreMenu('all');
   });
 
-  // Tab picker toggle
-  els.tabPickerButton?.addEventListener('click', (event) => {
-    event.stopPropagation();
-    const picker = document.getElementById('tabPicker');
-    if (picker && !picker.hidden) {
-      picker.hidden = true;
-    } else {
-      renderTabPicker('');
-    }
-  });
-
   // Close floating menus on outside click
   document.addEventListener('click', (event) => {
     if (els.quickMoreMenu && !els.quickMoreMenu.hidden && !event.target.closest('#quickMoreMenu, #commandMenuButton')) {
@@ -4386,11 +4446,6 @@ function bindEvents() {
     if (els.contextScopeMenu && !els.contextScopeMenu.hidden && !event.target.closest('#contextScopeMenu, #contextScopeButton')) {
       els.contextScopeMenu.hidden = true;
       renderContextScopeControls();
-    }
-    const picker = document.getElementById('tabPicker');
-    if (!picker || picker.hidden) return;
-    if (!event.target.closest('#tabPicker, #tabPickerButton')) {
-      picker.hidden = true;
     }
   });
   chrome.tabs?.onActivated?.addListener?.((activeInfo) => {

@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 
 import {
   CONTEXT_SCOPE_MODES,
+  compactPinnedTitle,
+  contextScopeFromTab,
   filterPromptTabs,
   messageStorageKeyForScope,
   normalizeContextScope,
@@ -43,6 +45,14 @@ test('scope storage keys isolate messages and sessions per pinned tab', () => {
   const scope = normalizeContextScope({ mode: 'pinned-tab', pinnedTabId: 2 });
   assert.equal(messageStorageKeyForScope(scope), 'hermesBrowserMessages:tab:2');
   assert.equal(sessionBindingKeyForScope(scope), 'hermesBrowserSession:tab:2');
+});
+
+test('pinned tab titles are clipped before storage/session naming', () => {
+  const longTitle = 'Forward deployed engineer - Nous Research '.repeat(4);
+  const scope = contextScopeFromTab({ id: 3, windowId: 10, title: longTitle, url: 'https://nousresearch.com' });
+  assert.equal(scope.pinnedTitle.length <= 72, true);
+  assert.equal(scope.pinnedTitle.endsWith('…'), true);
+  assert.equal(compactPinnedTitle('short title'), 'short title');
 });
 
 test('filterPromptTabs keeps selected tab ids only and allows empty selections', () => {

@@ -158,6 +158,10 @@ test('v0.1.6 UI has compatibility, token hygiene, and What Hermes saw surfaces',
   assert.match(html, /id="quickMoreMenu" class="quick-more-menu"/);
   assert.doesNotMatch(html, /class="quick-actions"/);
   assert.doesNotMatch(html, /id="quickActionsScroll"/);
+  assert.doesNotMatch(html, /id="tabPickerButton"/);
+  assert.doesNotMatch(html, /tab-picker-btn/);
+  assert.match(js, /context-scope-prompt-controls/);
+  assert.match(js, /promptTabToggle/);
   assert.match(html, /id="connectionSecuritySummary"/);
   assert.match(html, /id="clearTokenButton"/);
   assert.match(html, /version loading/i);

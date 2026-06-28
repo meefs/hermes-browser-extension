@@ -255,6 +255,21 @@ test('shouldSubmitComposerKey sends on Enter while preserving Shift+Enter for ne
   assert.equal(shouldSubmitComposerKey({ key: 'Enter', shiftKey: false, isComposing: true }), false);
 });
 
+test('composer renders context scope control in the header across from Ask Hermes', () => {
+  const html = readFileSync(new URL('../extension/sidepanel.html', import.meta.url), 'utf8');
+  const headerIndex = html.indexOf('class="composer-header"');
+  const labelIndex = html.indexOf('class="composer-label"');
+  const scopeIndex = html.indexOf('id="contextScopeButton"');
+  const chipIndex = html.indexOf('id="contextChip"');
+  assert.notEqual(headerIndex, -1);
+  assert.notEqual(labelIndex, -1);
+  assert.notEqual(scopeIndex, -1);
+  assert.notEqual(chipIndex, -1);
+  assert.ok(labelIndex > headerIndex, 'Ask Hermes label should be inside the composer header');
+  assert.ok(scopeIndex > labelIndex, 'context scope control should sit across from the Ask Hermes label');
+  assert.ok(scopeIndex < chipIndex, 'context scope control should render above the DOM chip, not below it');
+});
+
 test('composer renders an inline up-arrow send button immediately after voice dictation', () => {
   const html = readFileSync(new URL('../extension/sidepanel.html', import.meta.url), 'utf8');
   const voiceIndex = html.indexOf('id="voiceButton"');

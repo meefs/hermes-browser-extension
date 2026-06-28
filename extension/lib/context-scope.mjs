@@ -12,6 +12,15 @@ export const DEFAULT_CONTEXT_SCOPE = Object.freeze({
   selectedTabIds: null,
 });
 
+export const MAX_PINNED_TITLE_CHARS = 72;
+
+export function compactPinnedTitle(value = '', max = MAX_PINNED_TITLE_CHARS) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (text.length <= max) return text;
+  if (max <= 1) return text.slice(0, max);
+  return `${text.slice(0, max - 1).trimEnd()}…`;
+}
+
 function finiteNumberOrNull(value) {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : null;
@@ -32,7 +41,7 @@ export function normalizeContextScope(scope = {}) {
     mode,
     pinnedTabId: finiteNumberOrNull(scope?.pinnedTabId),
     pinnedWindowId: finiteNumberOrNull(scope?.pinnedWindowId),
-    pinnedTitle: String(scope?.pinnedTitle || ''),
+    pinnedTitle: compactPinnedTitle(scope?.pinnedTitle || ''),
     pinnedUrl: String(scope?.pinnedUrl || ''),
     selectedTabIds: normalizeSelectedTabIds(scope?.selectedTabIds),
   };

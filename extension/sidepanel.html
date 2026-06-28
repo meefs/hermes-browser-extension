@@ -82,16 +82,15 @@
 
       <footer class="bottom-dock" aria-label="Hermes Browser Extension controls">
         <form id="composer" class="composer">
-          <label class="composer-label" for="promptInput">ASK HERMES</label>
+          <div class="composer-header">
+            <label class="composer-label" for="promptInput">ASK HERMES</label>
+            <button id="contextScopeButton" class="context-scope-button" type="button" aria-haspopup="dialog" aria-expanded="false" title="Choose which tab Hermes reads and which open tabs appear in the prompt">
+              <span id="contextScopeLabel">Follow active tab</span>
+            </button>
+          </div>
           <button id="contextChip" class="context-chip" type="button" aria-expanded="false">
             <span id="contextChipLabel">📎 Loading...</span>
             <strong>preview</strong>
-          </button>
-          <button id="contextScopeButton" class="context-scope-button" type="button" aria-haspopup="dialog" aria-expanded="false" title="Choose which tab Hermes reads">
-            <span id="contextScopeLabel">Follow active tab</span>
-          </button>
-          <button id="tabPickerButton" class="tab-picker-btn" type="button" title="Select tabs to list in the prompt" aria-label="Select prompt tabs">
-            <span class="tab-picker-btn-icon">📑</span><span id="tabPickerCount" class="tab-picker-badge">0</span>
           </button>
           <div id="contextPreview" class="context-preview" hidden></div>
           <div id="contextScopeMenu" class="context-scope-menu" hidden></div>

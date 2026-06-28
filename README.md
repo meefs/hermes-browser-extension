@@ -33,7 +33,7 @@ This repo is specifically for the **Hermes Browser Extension**: the Chrome/Edge/
 - Auto-syncs connected Hermes providers/models, profiles, skills, sessions, and capabilities.
 - Shows a Hermes compatibility panel so older gateways degrade into explicit fallback/manual modes instead of broken route errors.
 - Sends active tab/browser context into a persisted Hermes session.
-- Adds follow/pin context controls so a side panel can stay locked to a specific browser tab.
+- Adds a composer-header context menu for following the active tab, pinning a specific tab, and choosing which open tabs appear in the prompt.
 - Keeps pinned-tab conversations isolated with per-tab local history and Hermes session bindings.
 - Adds quick commands for common browser-context work, including `/summarize`, `/explain`, `/rewrite`, `/tabs`, and `/action-items`.
 - Adds a collapsible “What Hermes saw” receipt after each sent turn for transparent context/debugging.
