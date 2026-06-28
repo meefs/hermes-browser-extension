@@ -2,11 +2,11 @@
 
 Hermes Browser Extension is a load-unpacked public alpha that sends browser context to the Hermes Agent runtime you configure.
 
-This document describes shipped v0.1.5 behavior.
+This document describes shipped v0.1.6 behavior.
 
 ## No analytics
 
-Hermes Browser Extension v0.1.5 does not include analytics, telemetry, ads, tracking pixels, or third-party reporting SDKs.
+Hermes Browser Extension v0.1.6 does not include analytics, telemetry, ads, tracking pixels, or third-party reporting SDKs.
 
 ## Local storage
 
@@ -18,6 +18,7 @@ The extension stores settings in `chrome.storage.local`, including:
 - context settings such as include-tabs/page-text/selected-text
 - appearance settings
 - local side-panel message history cache
+- per-tab local message caches and per-tab Hermes session bindings when you pin a browser tab
 
 Saved tokens are masked in the UI after save. The settings panel includes **Clear stored token** to remove the API key/browser token from extension storage.
 
@@ -34,6 +35,8 @@ The extension does not request or read:
 
 It reads page context from the active/current browser surface for the purpose of asking Hermes about what you are viewing.
 
+v0.1.6 can also pin the side panel to a specific tab. In pinned mode, the extension keeps that tab's local chat cache separate from the follow-active chat cache. Sensitive tab titles and URLs in restricted categories are redacted before prompt assembly.
+
 ## Local vs remote privacy boundary
 
 ### Local API mode
@@ -48,7 +51,7 @@ If you configure a remote Hermes URL, browser context is sent to that remote Her
 
 ## Voice privacy
 
-v0.1.5 supports two voice modes:
+v0.1.6 supports two voice modes:
 
 - **Hermes STT**: audio is captured in the extension page and sent once to the configured Hermes audio transcription endpoint when you stop recording.
 - **Browser speech fallback**: when Hermes STT is unavailable and Chromium exposes Web Speech, speech recognition runs in the browser and only transcript text is returned to the side panel.
@@ -59,7 +62,7 @@ No audio is intentionally saved by the voice dictation page.
 
 Text files can be included as text. Images can be included inline; when the connected Hermes runtime advertises image upload support, the extension can save image attachments through Hermes so the agent receives a local path-backed image reference.
 
-If image upload is unavailable, v0.1.5 keeps images inline and shows a fallback warning.
+If image upload is unavailable, v0.1.6 keeps images inline and shows a fallback warning.
 
 ## Remove extension data
 

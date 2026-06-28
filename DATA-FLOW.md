@@ -1,6 +1,6 @@
 # Data Flow
 
-Hermes Browser Extension connects browser context to the Hermes Agent runtime you configure. This document describes the shipped v0.1.5 data flow.
+Hermes Browser Extension connects browser context to the Hermes Agent runtime you configure. This document describes the shipped v0.1.6 data flow.
 
 ## Connection modes
 
@@ -27,11 +27,11 @@ When remote mode has a dashboard URL and no API key, the extension uses the sign
 Depending on settings and page availability, a turn can include:
 
 - user message typed into the composer
-- active tab title and URL
+- active tab title and URL for the followed or pinned context tab
 - selected text
 - readable page text
 - page metadata, headings, form labels, links, buttons, and interactive element labels where available
-- open tab titles/URLs when “Include open tabs” is enabled
+- open tab titles/URLs when “Include open tabs” is enabled, or selected open-tab summaries when you use the tab picker
 - YouTube transcript text when a transcript provider is enabled and available
 - attached text files or metadata for non-text files
 - pasted/attached images as inline data, or as a local path when the connected Hermes runtime advertises image upload support
@@ -40,7 +40,7 @@ Depending on settings and page availability, a turn can include:
 
 ## What Hermes saw receipt
 
-v0.1.5 adds a collapsible “What Hermes saw” receipt after each sent turn. It summarizes:
+v0.1.6 includes a collapsible “What Hermes saw” receipt after each sent turn. It summarizes:
 
 - active tab
 - whether selected text was included
@@ -56,11 +56,13 @@ This receipt is for transparency and debugging. It is generated locally by the e
 
 Before page text is sent to Hermes, the extension redacts common secret/token shapes such as bearer tokens, provider API keys, private keys, GitHub tokens, Slack tokens, JWTs, and common `key=value` secret assignments.
 
+Before tab titles/URLs are included in the prompt, v0.1.6 redacts restricted categories such as browser internals, banking, crypto wallets, password managers, checkout/payment, health, and government tax/account pages.
+
 Browser page content is wrapped as untrusted context in the prompt. Hermes is instructed not to follow instructions from the page unless the human user explicitly asks.
 
 ## Capability detection
 
-The extension reads `/v1/capabilities` when available. If an older Hermes runtime does not expose that endpoint, v0.1.5 enters legacy compatibility mode:
+The extension reads `/v1/capabilities` when available. If an older Hermes runtime does not expose that endpoint, v0.1.6 enters legacy compatibility mode:
 
 - core chat/session features are attempted when the Gateway is connected and authenticated
 - browser-specific routes such as audio transcription, browser pairing, profile list, and image upload stay in fallback/manual mode unless advertised

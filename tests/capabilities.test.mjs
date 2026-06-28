@@ -148,7 +148,7 @@ test('buildContextReceipt summarizes exactly what browser context was sent', () 
   assert.match(receipt.items.find((item) => item.label === 'Attachments').value, /1 image, 1 file/);
 });
 
-test('v0.1.5 UI has compatibility, token hygiene, and What Hermes saw surfaces', () => {
+test('v0.1.6 UI has compatibility, token hygiene, and What Hermes saw surfaces', () => {
   const html = readFileSync(new URL('../extension/sidepanel.html', import.meta.url), 'utf8');
   const js = readFileSync(new URL('../extension/sidepanel.js', import.meta.url), 'utf8');
   const voiceJs = readFileSync(new URL('../extension/voice-dictation.js', import.meta.url), 'utf8');
