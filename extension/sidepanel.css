@@ -1775,6 +1775,33 @@ textarea:focus, input:focus, select:focus { border-color: var(--hermes-accent); 
 .session-menu footer { border-top: 1px solid rgba(var(--hermes-fg-rgb),0.18); padding: 6px 8px; }
 .model-menu footer button,
 .session-menu footer button { border: 0; background: transparent; color: rgba(var(--hermes-fg-rgb),0.8); padding: 5px 2px; font-size: 11px; text-align: left; text-transform: none; letter-spacing: 0; }
+.model-menu footer button.model-refreshing {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--hermes-accent);
+  cursor: progress;
+  opacity: 1;
+}
+.model-menu footer button.model-refreshing::before {
+  content: '';
+  width: 10px;
+  height: 10px;
+  border: 1px solid rgba(var(--hermes-accent-rgb),0.35);
+  border-top-color: var(--hermes-accent);
+  border-radius: 50%;
+  animation: modelRefreshSpin 720ms linear infinite;
+}
+.model-refresh-status {
+  margin: 0;
+  padding: 0 8px 7px;
+  color: rgba(var(--hermes-fg-rgb),0.7);
+  font-size: 10px;
+  line-height: 1.3;
+}
+@keyframes modelRefreshSpin {
+  to { transform: rotate(360deg); }
+}
 
 .context-popover {
   padding: 10px;

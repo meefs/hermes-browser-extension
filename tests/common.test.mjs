@@ -53,6 +53,7 @@ import {
   formatUpdateStatus,
   isDefaultBrowserSessionTitle,
   isNewerVersion,
+  modelRefreshControlState,
   normalizeExtensionVersion,
   normalizeGitCommit,
   shortGitCommit,
@@ -441,7 +442,29 @@ test('connect and startup sync Hermes models, sessions, skills, and profiles fro
   assert.match(source, /apiFetch\('\/v1\/skills'/);
   assert.match(source, /apiFetch\('\/v1\/profiles'/);
   assert.match(source, /apiFetch\(`\/api\/sessions\?limit=\$\{limit\}&offset=\$\{offset\}&include_children=true&order=recent`/);
-  assert.match(source, /els\.refreshModelsButton\.addEventListener\('click', \(\) => loadModels\(\{ refresh: true \}\)\)/);
+  assert.match(source, /els\.refreshModelsButton\.addEventListener\('click', refreshModelsFromMenu\)/);
+});
+
+test('model refresh control exposes compact loading state while syncing', () => {
+  const html = readFileSync(new URL('../extension/sidepanel.html', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../extension/sidepanel.css', import.meta.url), 'utf8');
+  assert.match(html, /id="modelRefreshStatus"/);
+  assert.match(css, /\.model-menu footer button\.model-refreshing::before/);
+  assert.match(css, /@keyframes modelRefreshSpin/);
+  assert.deepEqual(modelRefreshControlState({ refreshing: false }), {
+    label: '↻ Refresh Models',
+    title: 'Refresh model catalog',
+    disabled: false,
+    ariaBusy: 'false',
+    status: '',
+  });
+  assert.deepEqual(modelRefreshControlState({ refreshing: true }), {
+    label: 'Refreshing models…',
+    title: 'Refreshing model catalog',
+    disabled: true,
+    ariaBusy: 'true',
+    status: 'Refreshing models… this can take 20–30 seconds.',
+  });
 });
 
 test('assistant thinking placeholder renders animated indicator markup and reduced-motion CSS', () => {

@@ -28,6 +28,7 @@ import {
   isUsableRemoteGatewayUrl,
   microphonePermissionHelp,
   modelDisplayName,
+  modelRefreshControlState,
   modelRuntimeStatus,
   normalizeGitCommit,
   normalizeHermesModels,
@@ -150,6 +151,7 @@ const els = {
   modelMenuList: $('#modelMenuList'),
   modelOptionsList: $('#modelOptionsList'),
   refreshModelsButton: $('#refreshModelsButton'),
+  modelRefreshStatus: $('#modelRefreshStatus'),
   editModelsButton: $('#editModelsButton'),
   contextBarButton: $('#contextBarButton'),
   attachMenuButton: $('#attachMenuButton'),
@@ -233,6 +235,7 @@ let connectionProbeDetail = '';
 let connectionProbeTimer = null;
 let connectionProbeInFlight = false;
 let gatewayCapabilities = { ...DEFAULT_GATEWAY_CAPABILITIES };
+let modelsRefreshing = false;
 const CONNECTION_PROBE_INTERVAL_MS = 30_000;
 
 // remote-dashboard mode authenticates over the dashboard WebSocket with a
@@ -2219,7 +2222,30 @@ function applySelectedModel(selectedId, { persist = true, keepOpen = false } = {
   }
 }
 
+function renderModelRefreshState() {
+  const state = modelRefreshControlState({ refreshing: modelsRefreshing });
+  if (els.refreshModelsButton) {
+    els.refreshModelsButton.disabled = state.disabled;
+    els.refreshModelsButton.textContent = state.label;
+    els.refreshModelsButton.title = state.title;
+    els.refreshModelsButton.setAttribute('aria-label', state.title);
+    els.refreshModelsButton.setAttribute('aria-busy', state.ariaBusy);
+    els.refreshModelsButton.classList.toggle('model-refreshing', modelsRefreshing);
+  }
+  if (els.modelRefreshStatus) {
+    els.modelRefreshStatus.textContent = state.status;
+    els.modelRefreshStatus.hidden = !state.status;
+  }
+}
+
 async function loadModels({ quiet = false, payload = null, refresh = false } = {}) {
+  const trackRefresh = Boolean(refresh && !payload);
+  if (trackRefresh) {
+    if (modelsRefreshing) return;
+    modelsRefreshing = true;
+    renderModelRefreshState();
+    if (!quiet) setStatus('ok', 'Refreshing models', 'Syncing Hermes model catalog… this can take 20–30 seconds.');
+  }
   try {
     let data = payload;
     let registryModels = [];
@@ -2315,7 +2341,16 @@ async function loadModels({ quiet = false, payload = null, refresh = false } = {
     renderModelOptions(availableModels);
     renderContextWindow();
     if (!quiet) setStatus('warn', 'Model sync failed', error?.message || String(error));
+  } finally {
+    if (trackRefresh) {
+      modelsRefreshing = false;
+      renderModelRefreshState();
+    }
   }
+}
+
+async function refreshModelsFromMenu() {
+  await loadModels({ refresh: true });
 }
 
 async function loadSkills({ quiet = false } = {}) {
@@ -4361,7 +4396,8 @@ function bindEvents() {
   });
   els.voiceButton?.addEventListener('click', toggleVoiceDictation);
   els.checkUpdatesButton?.addEventListener('click', checkForUpdates);
-  els.refreshModelsButton.addEventListener('click', () => loadModels({ refresh: true }));
+  els.refreshModelsButton.addEventListener('click', refreshModelsFromMenu);
+  renderModelRefreshState();
   els.refreshProfilesButton?.addEventListener('click', () => loadProfiles());
   els.profileSelect?.addEventListener('change', () => applySelectedProfile(els.profileSelect.value));
   els.refreshAgentsButton?.addEventListener('click', () => loadAgents());

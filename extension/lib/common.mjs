@@ -561,6 +561,25 @@ export function composerControlState({ connected = false, sending = false, draft
   };
 }
 
+export function modelRefreshControlState({ refreshing = false } = {}) {
+  if (refreshing) {
+    return {
+      label: 'Refreshing models…',
+      title: 'Refreshing model catalog',
+      disabled: true,
+      ariaBusy: 'true',
+      status: 'Refreshing models… this can take 20–30 seconds.',
+    };
+  }
+  return {
+    label: '↻ Refresh Models',
+    title: 'Refresh model catalog',
+    disabled: false,
+    ariaBusy: 'false',
+    status: '',
+  };
+}
+
 export function queuedMessageControlState({ sending = false, text = '', canSteer = true } = {}) {
   const hasSteerText = Boolean(String(text || '').trim());
   return {

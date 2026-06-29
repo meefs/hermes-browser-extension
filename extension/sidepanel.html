@@ -157,9 +157,10 @@
           <div id="modelMenuList" class="model-menu-list"></div>
           <section id="modelOptionsList" class="model-options-list" aria-label="Model runtime options"></section>
           <footer>
-            <button id="refreshModelsButton" class="secondary" type="button">↻ Refresh Models</button>
+            <button id="refreshModelsButton" class="secondary" type="button" title="Refresh model catalog" aria-busy="false">↻ Refresh Models</button>
             <button id="editModelsButton" class="secondary" type="button">⚙ Edit Models...</button>
           </footer>
+          <p id="modelRefreshStatus" class="model-refresh-status" role="status" aria-live="polite" hidden></p>
         </section>
 
         <section id="contextPopover" class="context-popover" role="dialog" aria-label="Context window details" hidden>
