@@ -8,13 +8,16 @@ import {
   buildAudioTranscriptionBody,
   buildHermesModelOptions,
   buildHermesPrompt,
+  busyComposerSubmitAction,
   clampText,
+  classifyGatewayError,
   composerControlState,
   connectionStateForGateway,
   contextChipSummary,
   encodeSessionId,
   estimateContextWindow,
   estimateTokens,
+  escapeHtml,
   extractAssistantText,
   formatContextMeter,
   formatUpdateStatus,
@@ -37,8 +40,10 @@ import {
   normalizeHermesSessions,
   normalizeHermesSkills,
   normalizeExtensionVersion,
+  normalizeFastMode,
   normalizeGatewayMode,
   normalizeGatewayUrl,
+  normalizeToolActivity,
   normalizeReasoningEffort,
   pairingFailureMessage,
   queuedMessageControlState,
@@ -49,6 +54,7 @@ import {
   shouldFallbackToWebSpeechForTranscription,
   shouldSubmitComposerKey,
   shouldAutoOpenSessionGroup,
+  shouldAutoFlushQueuedTurn,
   skillSuggestionsForInput,
 } from './lib/common.mjs';
 import { extractYouTubeVideoId } from './lib/transcript.mjs';
@@ -95,6 +101,7 @@ import {
   shouldRefreshForTabEvent,
 } from './lib/context-scope.mjs';
 import {
+  PANEL_RESIDENCY_MODES,
   normalizePanelResidencyMode,
   parseSidePanelParams,
 } from './lib/panel-residency.mjs';
@@ -209,6 +216,7 @@ const els = {
 
 let settings = { ...DEFAULT_SETTINGS };
 let contextScope = normalizeContextScope(DEFAULT_CONTEXT_SCOPE);
+let previousConversationScope = normalizeContextScope(DEFAULT_CONTEXT_SCOPE);
 let currentContext = { activeTab: null, tabs: [], pageContext: null, contextScope };
 let selectedTabs = []; // null = all tabs; array of SafeTab = user-filtered set
 let messages = [];
@@ -224,6 +232,7 @@ let sending = false;
 let queuedTurn = null;
 let activeAbortController = null;
 let activeRunId = '';
+let pendingSteerText = '';
 let dragDepth = 0;
 let speechRecognition = null;
 let voiceRecorder = null;
@@ -233,6 +242,17 @@ let dictating = false;
 let dictationBaseText = '';
 let dictationFinalText = '';
 let sessionRoutesAvailable = null;
+
+let activeSessionRuntime = {
+  sessionId: '',
+  usedTokens: 0,
+  inputTokens: 0,
+  outputTokens: 0,
+  contextTokens: 0,
+  model: '',
+  provider: '',
+  source: '',
+};
 // The remote-dashboard gateway mode talks to the OAuth-gated dashboard over its
 // /api/ws JSON-RPC socket (the api_server REST/SSE surface is unavailable
 // cross-origin). This holds the live socket + the dashboard-assigned session id.
@@ -274,6 +294,7 @@ function isConnected() {
 
 function connectionStateTitle(state, summary) {
   if (state.state === 'connected') return `Connected to ${summary.normalizedUrl}`;
+  if (state.state === 'degraded') return currentConnectionTroubleshooting(state) || `Connected with warnings to ${summary.normalizedUrl}`;
   if (state.state === 'connecting') return `Checking ${summary.normalizedUrl}`;
   if (state.state === 'unreachable') return gatewayConnectionTroubleshooting({
     gatewayMode: settings.gatewayMode,
@@ -422,17 +443,82 @@ function contextScopeSessionKey() {
   return `hermesBrowserContextScope:${ensureSidepanelInstanceId()}`;
 }
 
+function conversationScopeSessionKey() {
+  return `hermesBrowserConversationScope:${ensureSidepanelInstanceId()}`;
+}
+
+function conversationScopeForContextScope(scope = contextScope, fallback = previousConversationScope) {
+  const normalized = normalizeContextScope(scope);
+  if (normalized.mode !== CONTEXT_SCOPE_MODES.CHAT_ONLY) return normalized;
+  const conversation = normalizeContextScope(fallback || DEFAULT_CONTEXT_SCOPE);
+  return conversation.mode === CONTEXT_SCOPE_MODES.CHAT_ONLY
+    ? normalizeContextScope(DEFAULT_CONTEXT_SCOPE)
+    : conversation;
+}
+
+function saveConversationScopeForInstance() {
+  try {
+    globalThis.sessionStorage?.setItem(conversationScopeSessionKey(), JSON.stringify(previousConversationScope));
+  } catch {
+    // Per-panel conversation-scope persistence is best-effort only.
+  }
+}
+
+function loadConversationScopeForInstance() {
+  try {
+    const stored = globalThis.sessionStorage?.getItem(conversationScopeSessionKey());
+    if (stored) return conversationScopeForContextScope(JSON.parse(stored), previousConversationScope);
+  } catch {
+    // Fall through to current/default conversation scope.
+  }
+  return conversationScopeForContextScope(contextScope, previousConversationScope);
+}
+
+function rememberConversationScope(scope = contextScope) {
+  previousConversationScope = conversationScopeForContextScope(scope, previousConversationScope);
+  saveConversationScopeForInstance();
+  return previousConversationScope;
+}
+
+function isGlobalPanelResidency() {
+  return normalizePanelResidencyMode(settings.panelResidencyMode) === PANEL_RESIDENCY_MODES.GLOBAL
+    && sidePanelParams.panelMode === PANEL_RESIDENCY_MODES.GLOBAL;
+}
+
+function isAttachedPanelResidency() {
+  return !isGlobalPanelResidency() && sidePanelParams.panelMode === PANEL_RESIDENCY_MODES.TAB_ATTACHED && Boolean(sidePanelParams.tabId);
+}
+
+function syncAttachedPanelContextScope() {
+  if (!isAttachedPanelResidency()) return;
+  if (contextScope.mode === CONTEXT_SCOPE_MODES.CHAT_ONLY) return;
+  if (contextScope.mode === CONTEXT_SCOPE_MODES.PINNED_TAB && Number(contextScope.pinnedTabId) === Number(sidePanelParams.tabId)) return;
+  contextScope = normalizeContextScope({
+    ...contextScope,
+    mode: CONTEXT_SCOPE_MODES.PINNED_TAB,
+    pinnedTabId: sidePanelParams.tabId,
+    pinnedWindowId: contextScope.pinnedWindowId,
+    pinnedTitle: contextScope.pinnedTitle || '',
+    pinnedUrl: contextScope.pinnedUrl || '',
+  });
+  rememberConversationScope(contextScope);
+  saveContextScopeForInstance();
+}
+
 function loadContextScopeForInstance() {
   try {
     const stored = globalThis.sessionStorage?.getItem(contextScopeSessionKey());
     if (stored) {
       contextScope = normalizeContextScope(JSON.parse(stored));
+      if (isAttachedPanelResidency()) syncAttachedPanelContextScope();
+      previousConversationScope = loadConversationScopeForInstance();
+      rememberConversationScope(contextScope);
       return contextScope;
     }
   } catch {
     // Fall through to URL-derived/default scope.
   }
-  if (sidePanelParams.panelMode === 'tab-attached' && sidePanelParams.tabId) {
+  if (isAttachedPanelResidency()) {
     contextScope = normalizeContextScope({
       mode: CONTEXT_SCOPE_MODES.PINNED_TAB,
       pinnedTabId: sidePanelParams.tabId,
@@ -440,6 +526,8 @@ function loadContextScopeForInstance() {
   } else {
     contextScope = normalizeContextScope(DEFAULT_CONTEXT_SCOPE);
   }
+  previousConversationScope = loadConversationScopeForInstance();
+  rememberConversationScope(contextScope);
   saveContextScopeForInstance();
   return contextScope;
 }
@@ -452,41 +540,41 @@ function saveContextScopeForInstance() {
   }
 }
 
-function activeMessagesStorageKey() {
-  return contextScope.mode === CONTEXT_SCOPE_MODES.PINNED_TAB || contextScope.mode === CONTEXT_SCOPE_MODES.CHAT_ONLY
-    ? messageStorageKeyForScope(contextScope)
+function activeMessagesStorageKey(conversationScope = previousConversationScope) {
+  return conversationScope.mode === CONTEXT_SCOPE_MODES.PINNED_TAB
+    ? messageStorageKeyForScope(contextScope, conversationScope)
     : 'hermesBrowserMessages';
 }
 
 async function loadMessagesForActiveScope() {
-  const key = activeMessagesStorageKey();
+  const key = activeMessagesStorageKey(previousConversationScope);
   const stored = await chrome.storage.local.get([key]);
   messages = Array.isArray(stored[key]) ? stored[key] : [];
   renderMessagesFromStorage();
 }
 
 async function saveMessagesForActiveScope() {
-  const key = activeMessagesStorageKey();
+  const key = activeMessagesStorageKey(previousConversationScope);
   await chrome.storage.local.set({ [key]: messages });
 }
 
 async function loadSessionBindingForActiveScope() {
-  if (contextScope.mode !== CONTEXT_SCOPE_MODES.PINNED_TAB) return null;
-  const key = sessionBindingKeyForScope(contextScope);
+  if (previousConversationScope.mode !== CONTEXT_SCOPE_MODES.PINNED_TAB) return null;
+  const key = sessionBindingKeyForScope(contextScope, previousConversationScope);
   const stored = await chrome.storage.local.get([key]);
   return stored[key] || null;
 }
 
 async function saveSessionBindingForActiveScope(session) {
-  if (contextScope.mode !== CONTEXT_SCOPE_MODES.PINNED_TAB || !session?.id) return;
-  const key = sessionBindingKeyForScope(contextScope);
+  if (previousConversationScope.mode !== CONTEXT_SCOPE_MODES.PINNED_TAB || !session?.id) return;
+  const key = sessionBindingKeyForScope(contextScope, previousConversationScope);
   await chrome.storage.local.set({
     [key]: {
       sessionId: session.id,
       sessionTitle: session.title || session.id,
-      pinnedTabId: contextScope.pinnedTabId,
-      pinnedTitle: contextScope.pinnedTitle || '',
-      pinnedUrl: contextScope.pinnedUrl || '',
+      pinnedTabId: previousConversationScope.pinnedTabId,
+      pinnedTitle: previousConversationScope.pinnedTitle || '',
+      pinnedUrl: previousConversationScope.pinnedUrl || '',
       updatedAt: Date.now(),
     },
   });
@@ -514,9 +602,12 @@ function syncSelectedTabsToContextScope() {
 function contextScopeLabel() {
   if (contextScope.mode === CONTEXT_SCOPE_MODES.CHAT_ONLY) return 'Chat only';
   if (contextScope.mode === CONTEXT_SCOPE_MODES.PINNED_TAB) {
+    if (isAttachedPanelResidency() && Number(contextScope.pinnedTabId) === Number(sidePanelParams.tabId)) {
+      return contextScope.pinnedTitle ? `Attached: ${contextScope.pinnedTitle}` : 'Attached tab';
+    }
     return contextScope.pinnedTitle ? `Pinned: ${contextScope.pinnedTitle}` : 'Pinned tab';
   }
-  return 'Follow active tab';
+  return isGlobalPanelResidency() ? 'Follow active tab' : 'Attached tab';
 }
 
 function renderContextScopeControls() {
@@ -529,8 +620,10 @@ function renderContextScopeControls() {
   els.contextScopeButton.title = chatOnly
     ? 'Hermes is in Chat only mode and will not read browser context'
     : pinned
-      ? `Hermes is pinned to ${contextScope.pinnedUrl || contextScope.pinnedTitle || 'this tab'}`
-      : 'Hermes follows the active browser tab';
+      ? (isAttachedPanelResidency() && Number(contextScope.pinnedTabId) === Number(sidePanelParams.tabId)
+        ? `Hermes is attached to ${contextScope.pinnedUrl || contextScope.pinnedTitle || 'this browser tab'}`
+        : `Hermes is pinned to ${contextScope.pinnedUrl || contextScope.pinnedTitle || 'this tab'}`)
+      : (isGlobalPanelResidency() ? 'Hermes follows the active browser tab' : 'Hermes is attached to this browser tab');
 }
 
 function appendContextScopeMenuButton({ action, label, detail = '', selected = false, parent = els.contextScopeMenu }) {
@@ -625,6 +718,21 @@ function renderContextScopeTabList(query = '') {
   }
 }
 
+function rerenderContextScopePromptSelectionPreservingScroll(query = currentContextScopeSearchQuery()) {
+  const list = els.contextScopeMenu?.querySelector('.context-scope-list');
+  const promptControls = els.contextScopeMenu?.querySelector('.context-scope-prompt-controls');
+  if (!list) {
+    if (promptControls) promptControls.replaceWith(renderContextScopePromptControls(currentContext.tabs || []));
+    renderContextScopeControls();
+    return;
+  }
+  const previousScrollTop = list.scrollTop;
+  if (promptControls) promptControls.replaceWith(renderContextScopePromptControls(currentContext.tabs || []));
+  renderContextScopeTabList(query);
+  list.scrollTop = Math.min(previousScrollTop, Math.max(0, list.scrollHeight - list.clientHeight));
+  renderContextScopeControls();
+}
+
 function renderContextScopePromptControls(tabs = currentContext.tabs || []) {
   const section = document.createElement('section');
   section.className = 'context-scope-prompt-controls';
@@ -672,15 +780,19 @@ function renderContextScopeMenu(query = '', { focusSearch = false } = {}) {
     selected: contextScope.mode === CONTEXT_SCOPE_MODES.CHAT_ONLY,
     parent: actions,
   });
-  appendContextScopeMenuButton({
-    action: 'follow-active',
-    label: 'Follow active tab',
-    detail: 'live',
-    selected: contextScope.mode === CONTEXT_SCOPE_MODES.FOLLOW_ACTIVE,
-    parent: actions,
-  });
+  if (isGlobalPanelResidency()) {
+    appendContextScopeMenuButton({
+      action: 'follow-active',
+      label: 'Follow active tab',
+      detail: 'live',
+      selected: contextScope.mode === CONTEXT_SCOPE_MODES.FOLLOW_ACTIVE,
+      parent: actions,
+    });
+  } else if (contextScope.mode === CONTEXT_SCOPE_MODES.FOLLOW_ACTIVE) {
+    syncAttachedPanelContextScope();
+  }
   appendContextScopeMenuButton({ action: 'pin-active', label: 'Pin current tab', detail: 'lock', parent: actions });
-  if (contextScope.mode === CONTEXT_SCOPE_MODES.PINNED_TAB) {
+  if (isGlobalPanelResidency() && contextScope.mode === CONTEXT_SCOPE_MODES.PINNED_TAB) {
     appendContextScopeMenuButton({ action: 'unlock', label: 'Unlock pinned tab', detail: 'follow', parent: actions });
   }
   els.contextScopeMenu.appendChild(actions);
@@ -723,7 +835,7 @@ function makePinnedTabSessionTitle(tab = {}) {
 }
 
 async function ensureSessionForActiveScope({ focus = false } = {}) {
-  if (contextScope.mode !== CONTEXT_SCOPE_MODES.PINNED_TAB) {
+  if (previousConversationScope.mode !== CONTEXT_SCOPE_MODES.PINNED_TAB) {
     await ensureDefaultBrowserSession({ focus });
     return;
   }
@@ -738,11 +850,14 @@ async function ensureSessionForActiveScope({ focus = false } = {}) {
     await openHermesSession(session);
     return;
   }
-  await createHermesBrowserSession({ title: makePinnedTabSessionTitle(currentContext.activeTab || contextScope), focus });
+  await createHermesBrowserSession({ title: makePinnedTabSessionTitle(currentContext.activeTab || previousConversationScope), focus });
 }
 
 async function applyContextScope(nextScope, { ensureSession = false } = {}) {
   contextScope = normalizeContextScope(nextScope);
+  previousConversationScope = conversationScopeForContextScope(contextScope, previousConversationScope);
+  if (contextScope.mode !== CONTEXT_SCOPE_MODES.CHAT_ONLY) rememberConversationScope(contextScope);
+  else saveConversationScopeForInstance();
   saveContextScopeForInstance();
   syncSelectedTabsFromContextScope(currentContext.tabs || []);
   renderContextScopeControls();
@@ -965,7 +1080,9 @@ function updateConnectionPrompt() {
     }
   } else {
     els.sendButton.textContent = sending ? 'Hermes running' : 'Ask Hermes';
-    els.connectStatus.textContent = 'Connected to Hermes. You can start chatting with page context.';
+    els.connectStatus.textContent = state.state === 'degraded'
+      ? `Connected to Hermes with a runtime warning. ${currentConnectionTroubleshooting(state)}`
+      : 'Connected to Hermes. You can start chatting with page context.';
   }
   updateComposerBusyState();
 }
@@ -1054,13 +1171,30 @@ function renderQueueNotice() {
 function queueCurrentDraft() {
   const text = els.input.value.trim();
   if (!text && !attachments.length) return false;
-  queuedTurn = { text, attachments: [...attachments] };
+  queuedTurn = { text, attachments: [...attachments], kind: 'queued', autoSend: true };
   els.input.value = '';
   clearAttachments();
   renderSkillSuggestions();
   updateComposerBusyState();
   setStatus('ok', 'Message queued', 'Hermes will send it after the current turn finishes or stops.');
   els.input.focus();
+  return true;
+}
+
+function restoreBackendQueuedSteerDraft(text) {
+  const steerText = String(text || '').trim();
+  if (!steerText) return false;
+  pendingSteerText = '';
+  const currentDraft = String(els.input?.value || '').trim();
+  if (els.input && !currentDraft) {
+    els.input.value = steerText;
+  } else if (els.input && currentDraft && !currentDraft.includes(steerText)) {
+    els.input.value = `${currentDraft}\n\n${steerText}`;
+  }
+  renderSkillSuggestions();
+  updateComposerBusyState();
+  setStatus('warn', 'Steer not injected', 'Hermes accepted the steer but did not expose an active injection point. The text is back in the composer; click Steer again while Hermes is working, or send it after this turn finishes.');
+  els.input?.focus();
   return true;
 }
 
@@ -1080,10 +1214,11 @@ async function sendSteerText(text) {
     setStatus('warn', 'Nothing to steer', 'Hermes is not currently running. Send or queue the message instead.');
     return false;
   }
+  pendingSteerText = steerText;
   if (isRemoteWsMode()) {
     const connection = await ensureRemoteWsClient();
     const sessionId = await ensureRemoteWsSession(connection);
-    await connection.client.request(WS_METHODS.promptSubmit, { session_id: sessionId, text: `/steer ${steerText}` });
+    await connection.client.request(WS_METHODS.sessionSteer, { session_id: sessionId, text: steerText });
     return true;
   }
   if (!canSteerActiveRun()) {
@@ -1094,7 +1229,7 @@ async function sendSteerText(text) {
   }
   const response = await apiFetch(`/v1/runs/${encodeURIComponent(activeRunId)}/steer`, {
     method: 'POST',
-    body: JSON.stringify({ input: steerText, message: steerText }),
+    body: JSON.stringify({ input: steerText, message: steerText, text: steerText }),
   });
   const payload = await readJsonResponse(response);
   if (!response.ok) {
@@ -1115,10 +1250,11 @@ async function steerCurrentDraft() {
     els.input.value = '';
     renderSkillSuggestions();
     updateComposerBusyState();
-    setStatus('ok', 'Steered current run', 'Hermes will receive this guidance inside the active turn.');
+    setStatus('ok', 'Steer sent to active run', 'Hermes will consume it if the current turn reaches an injection point; otherwise the draft will return here.');
     els.input.focus();
     return true;
   } catch (error) {
+    pendingSteerText = '';
     setStatus('warn', 'Steer failed', error?.message || String(error));
     els.input.focus();
     return false;
@@ -1134,10 +1270,11 @@ async function steerQueuedTurn() {
     if (queuedTurn.attachments?.length) queuedTurn = { text: '', attachments: queuedTurn.attachments };
     else queuedTurn = null;
     renderQueueNotice();
-    setStatus('ok', 'Steered queued message', 'The queued text was injected into the active run.');
+    setStatus('ok', 'Steer sent to active run', 'Hermes will consume the queued text if the current turn reaches an injection point.');
     els.input.focus();
     return true;
   } catch (error) {
+    pendingSteerText = '';
     setStatus('warn', 'Steer failed', error?.message || String(error));
     els.input.focus();
     return false;
@@ -1570,6 +1707,80 @@ function formatTokens(tokens = 0) {
 function estimateLocalSessionTokens(userText = '') {
   const messageTokens = messages.reduce((total, message) => total + estimateTokens(message.content || ''), 0);
   return messageTokens + estimateTokens(userText || '') + estimateAttachmentTokens();
+}
+
+function numericTokenField(value = 0) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) && number > 0 ? number : 0;
+}
+
+function usageTokenTotal(usage = {}) {
+  if (!usage || typeof usage !== 'object') return 0;
+  const explicit = numericTokenField(usage.total_tokens || usage.totalTokens);
+  if (explicit) return explicit;
+  return numericTokenField(usage.input_tokens || usage.prompt_tokens || usage.inputTokens || usage.promptTokens)
+    + numericTokenField(usage.output_tokens || usage.completion_tokens || usage.outputTokens || usage.completionTokens)
+    + numericTokenField(usage.cache_read_tokens || usage.cacheReadTokens)
+    + numericTokenField(usage.cache_write_tokens || usage.cacheWriteTokens)
+    + numericTokenField(usage.reasoning_tokens || usage.reasoningTokens);
+}
+
+function sessionTokenTotal(session = {}) {
+  if (!session || typeof session !== 'object') return 0;
+  const explicit = numericTokenField(session.total_tokens || session.totalTokens);
+  if (explicit) return explicit;
+  return numericTokenField(session.input_tokens || session.inputTokens)
+    + numericTokenField(session.output_tokens || session.outputTokens)
+    + numericTokenField(session.cache_read_tokens || session.cacheReadTokens)
+    + numericTokenField(session.cache_write_tokens || session.cacheWriteTokens)
+    + numericTokenField(session.reasoning_tokens || session.reasoningTokens);
+}
+
+function runtimeContextTokens(runtime = {}) {
+  if (!runtime || typeof runtime !== 'object') return 0;
+  return numericTokenField(runtime.context_length || runtime.contextLength || runtime.context_tokens || runtime.contextTokens);
+}
+
+function applySessionRuntimeSnapshot({ session = null, usage = null, runtime = null, sessionId = settings.sessionId, source = 'session' } = {}) {
+  const id = String(sessionId || session?.id || activeSessionRuntime.sessionId || settings.sessionId || '');
+  const sameSession = !activeSessionRuntime.sessionId || activeSessionRuntime.sessionId === id;
+  const sessionUsed = sessionTokenTotal(session);
+  const usageUsed = usageTokenTotal(usage);
+  const previousUsed = sameSession ? numericTokenField(activeSessionRuntime.usedTokens) : 0;
+  const usedTokens = Math.max(previousUsed, sessionUsed, usageUsed);
+  const contextTokens = runtimeContextTokens(runtime)
+    || numericTokenField(session?.context_length || session?.contextLength || session?.modelContextTokens)
+    || (sameSession ? numericTokenField(activeSessionRuntime.contextTokens) : 0)
+    || numericTokenField(settings.modelContextTokens);
+  const existingModel = sameSession ? String(activeSessionRuntime.model || '').trim() : '';
+  const existingProvider = sameSession ? String(activeSessionRuntime.provider || '').trim() : '';
+  activeSessionRuntime = {
+    sessionId: id,
+    usedTokens,
+    inputTokens: Math.max(
+      sameSession ? numericTokenField(activeSessionRuntime.inputTokens) : 0,
+      numericTokenField(session?.input_tokens || session?.inputTokens),
+      numericTokenField(usage?.input_tokens || usage?.prompt_tokens || usage?.inputTokens || usage?.promptTokens),
+    ),
+    outputTokens: Math.max(
+      sameSession ? numericTokenField(activeSessionRuntime.outputTokens) : 0,
+      numericTokenField(session?.output_tokens || session?.outputTokens),
+      numericTokenField(usage?.output_tokens || usage?.completion_tokens || usage?.outputTokens || usage?.completionTokens),
+    ),
+    contextTokens,
+    model: String(runtime?.model || existingModel || session?.model || '').trim(),
+    provider: String(runtime?.provider || existingProvider || session?.provider || '').trim(),
+    source: usedTokens ? source : '',
+  };
+  if (contextTokens && contextTokens !== settings.modelContextTokens) {
+    settings = { ...settings, modelContextTokens: contextTokens };
+  }
+  renderContextWindow();
+}
+
+function syncActiveSessionRuntimeFromList() {
+  const session = availableSessions.find((item) => item.id === settings.sessionId);
+  if (session) applySessionRuntimeSnapshot({ session, sessionId: session.id, source: 'Hermes session' });
 }
 
 const TEXT_ATTACHMENT_LIMIT = 12_000;
@@ -2052,9 +2263,10 @@ function modelProviderLabel(model = {}) {
 
 function updateModelButtonMeta() {
   const effort = reasoningEffortShortLabel(settings.reasoningEffort);
-  const fast = settings.fastMode ? ' Fast' : '';
+  const fastMode = normalizeFastMode(settings.fastMode);
+  const fast = fastMode ? ' Fast' : '';
   els.currentModelEffort.textContent = `${fast}${effort}`.trim();
-  els.currentModelEffort.title = `Reasoning effort: ${effort}${settings.fastMode ? ' · Fast' : ''}`;
+  els.currentModelEffort.title = `Reasoning effort: ${effort}${fastMode ? ' · Fast' : ''}`;
 }
 
 function renderModelOptions(models = availableModels) {
@@ -2174,7 +2386,7 @@ function renderModelMenu(query = els.modelSearchInput?.value || '') {
 function renderModelRuntimeOptions() {
   if (!els.modelOptionsList) return;
   const thinkingEnabled = settings.thinkingEnabled !== false;
-  const fastMode = Boolean(settings.fastMode);
+  const fastMode = normalizeFastMode(settings.fastMode);
   const effort = normalizeReasoningEffort(settings.reasoningEffort);
   const effortRows = MODEL_EFFORTS.map((item) => `
     <button class="model-effort-option ${item.value === effort ? 'selected' : ''}" type="button" data-effort="${item.value}">
@@ -2215,18 +2427,26 @@ function renderContextWindow(userText = els.input?.value || '') {
     contextScope,
     settings,
   });
-  const sessionTokens = estimateLocalSessionTokens(userText);
-  const meter = formatContextMeter({ estimatedTokens: sessionTokens, modelContextTokens: stats.modelContextTokens });
+  const localSessionTokens = estimateLocalSessionTokens(userText);
+  const draftTokens = estimateTokens(userText || '') + estimateAttachmentTokens();
+  const serverSessionTokens = activeSessionRuntime.sessionId === settings.sessionId
+    ? numericTokenField(activeSessionRuntime.usedTokens)
+    : 0;
+  const sessionTokens = serverSessionTokens ? Math.max(serverSessionTokens + draftTokens, localSessionTokens) : localSessionTokens;
+  const contextLimit = numericTokenField(activeSessionRuntime.contextTokens) || stats.modelContextTokens;
+  const runtimeLabel = [activeSessionRuntime.provider, activeSessionRuntime.model].filter(Boolean).join(' · ');
+  const sourceLabel = serverSessionTokens ? `Hermes session${runtimeLabel ? ` · ${runtimeLabel}` : ''}` : 'local estimate';
+  const meter = formatContextMeter({ estimatedTokens: sessionTokens, modelContextTokens: contextLimit });
 
   els.contextCompactLabel.textContent = meter.compactLabel;
   els.contextPercentLabel.textContent = meter.percentLabel;
-  els.contextBarButton.title = stats.modelContextTokens
-    ? `${formatNumber(sessionTokens)} estimated session tokens of ${formatNumber(stats.modelContextTokens)} available. Next prompt payload estimate: ${formatNumber(stats.estimatedTokens)} tokens.`
-    : `${formatNumber(sessionTokens)} estimated session tokens. Selected model did not report a max context window.`;
-  els.contextUsageDetail.textContent = stats.modelContextTokens
-    ? `${formatNumber(sessionTokens)} / ${formatNumber(stats.modelContextTokens)} tokens · ${meter.percentLabel} · next prompt ${formatNumber(stats.estimatedTokens)} tok`
-    : `${formatNumber(sessionTokens)} estimated session tokens · unknown max context`;
-  els.contextMeterFill.style.width = stats.modelContextTokens ? `${Math.min(100, Math.max(0, meter.percent))}%` : '0%';
+  els.contextBarButton.title = contextLimit
+    ? `${formatNumber(sessionTokens)} tokens from ${sourceLabel} of ${formatNumber(contextLimit)} available. Next prompt payload estimate: ${formatNumber(stats.estimatedTokens)} tokens.`
+    : `${formatNumber(sessionTokens)} tokens from ${sourceLabel}. Selected/effective model did not report a max context window.`;
+  els.contextUsageDetail.textContent = contextLimit
+    ? `${formatNumber(sessionTokens)} / ${formatNumber(contextLimit)} tokens · ${meter.percentLabel} · ${sourceLabel} · next prompt ${formatNumber(stats.estimatedTokens)} tok`
+    : `${formatNumber(sessionTokens)} tokens · ${sourceLabel} · unknown max context`;
+  els.contextMeterFill.style.width = contextLimit ? `${Math.min(100, Math.max(0, meter.percent))}%` : '0%';
 
   const pc = currentContext?.pageContext;
   if (contextScope.mode === CONTEXT_SCOPE_MODES.CHAT_ONLY) {
@@ -2334,22 +2554,22 @@ async function loadModels({ quiet = false, payload = null, refresh = false } = {
     if (data) {
       registryModels = normalizeHermesModels(data, settings.model);
     } else {
-      const dashboardResult = await discoverModelsFromDashboard({
-        baseUrl: dashboardModelDiscoveryBaseUrl({
-          gatewayMode: settings.gatewayMode,
-          gatewayUrl: settings.gatewayUrl,
-        }),
-        refresh,
-        profile: settings.activeProfile,
-      });
-      if (dashboardResult.ok && dashboardResult.models.length) {
-        registryModels = normalizeHermesModels(dashboardResult.models, settings.model);
-        registrySource = 'dashboard';
+      const registryResult = await discoverModelsFromRegistry({ apiFetch, readJsonResponse, refresh });
+      if (registryResult.ok && registryResult.models.length) {
+        registryModels = normalizeHermesModels(registryResult.models, settings.model);
+        registrySource = 'registry';
       } else {
-        const registryResult = await discoverModelsFromRegistry({ apiFetch, readJsonResponse, refresh });
-        if (registryResult.ok && registryResult.models.length) {
-          registryModels = normalizeHermesModels(registryResult.models, settings.model);
-          registrySource = 'registry';
+        const dashboardResult = await discoverModelsFromDashboard({
+          baseUrl: dashboardModelDiscoveryBaseUrl({
+            gatewayMode: settings.gatewayMode,
+            gatewayUrl: settings.gatewayUrl,
+          }),
+          refresh,
+          profile: settings.activeProfile,
+        });
+        if (dashboardResult.ok && dashboardResult.models.length) {
+          registryModels = normalizeHermesModels(dashboardResult.models, settings.model);
+          registrySource = 'dashboard';
         } else {
           const response = await apiFetch('/v1/models', { method: 'GET' });
           data = await readJsonResponse(response);
@@ -2408,7 +2628,9 @@ async function loadModels({ quiet = false, payload = null, refresh = false } = {
     availableModels = normalizeHermesModels([], settings.model);
     renderModelOptions(availableModels);
     renderContextWindow();
-    if (!quiet) setStatus('warn', 'Model sync failed', error?.message || String(error));
+    const diagnostic = classifyGatewayError(error);
+    if (diagnostic.probeStatus === 'degraded') markGatewayDegraded(error);
+    if (!quiet) setStatus('warn', diagnostic.kind === 'unknown' ? 'Model sync failed' : diagnostic.title, diagnostic.kind === 'unknown' ? (error?.message || String(error)) : diagnostic.detail);
   } finally {
     if (trackRefresh) {
       modelsRefreshing = false;
@@ -2945,6 +3167,7 @@ async function loadSessions({ quiet = false } = {}) {
     try {
       const result = await remoteWsConnection.client.request(WS_METHODS.sessionList, { limit: 200 });
       availableSessions = normalizeHermesSessions(result);
+      syncActiveSessionRuntimeFromList();
       updateSessionLabel();
       renderSessionMenu();
       if (!quiet) setStatus('ok', 'Hermes sessions synced', `${availableSessions.length} sessions available`);
@@ -2964,6 +3187,7 @@ async function loadSessions({ quiet = false } = {}) {
   try {
     const payload = await loadAllHermesSessions();
     availableSessions = normalizeHermesSessions(payload);
+    syncActiveSessionRuntimeFromList();
     updateSessionLabel();
     renderSessionMenu();
     if (!quiet) setStatus('ok', 'Hermes sessions synced', `${availableSessions.length} sessions available`);
@@ -3060,7 +3284,7 @@ async function createHermesBrowserSession({ title = makeBrowserSessionTitle(), f
     const result = await connection.client.request(WS_METHODS.sessionCreate, {
       title,
       reasoning_effort: normalizeReasoningEffort(settings.reasoningEffort),
-      fast: Boolean(settings.fastMode),
+      fast: normalizeFastMode(settings.fastMode),
     });
     const id = result?.session_id;
     if (!id) throw new Error('Dashboard did not return a session id.');
@@ -3069,8 +3293,9 @@ async function createHermesBrowserSession({ title = makeBrowserSessionTitle(), f
       || { id, title, source: settings.sessionSource };
     availableSessions = normalizeHermesSessions({ sessions: [session, ...availableSessions.filter((item) => item.id !== id)] });
     settings = { ...settings, sessionId: id, sessionTitle: session.title || title };
+    activeSessionRuntime = { ...activeSessionRuntime, sessionId: id, usedTokens: 0, inputTokens: 0, outputTokens: 0, model: '', provider: '', source: '' };
     messages = [];
-    await chrome.storage.local.set({ hermesBrowserSettings: settings, [activeMessagesStorageKey()]: [] });
+    await chrome.storage.local.set({ hermesBrowserSettings: settings, [activeMessagesStorageKey(previousConversationScope)]: [] });
     await saveSessionBindingForActiveScope(session);
     renderMessagesFromStorage();
     updateSessionLabel();
@@ -3095,9 +3320,10 @@ async function createHermesBrowserSession({ title = makeBrowserSessionTitle(), f
   const session = normalizeHermesSessions({ data: [payload.session || payload] })[0] || { id: sessionId, title, source: settings.sessionSource };
   availableSessions = normalizeHermesSessions({ data: [session, ...availableSessions.filter((item) => item.id !== session.id)] });
   settings = { ...settings, sessionId: session.id, sessionTitle: session.title || title };
+  activeSessionRuntime = { ...activeSessionRuntime, sessionId: session.id, usedTokens: 0, inputTokens: 0, outputTokens: 0, model: '', provider: '', source: '' };
   sessionRoutesAvailable = true;
   messages = [];
-  await chrome.storage.local.set({ hermesBrowserSettings: settings, [activeMessagesStorageKey()]: [] });
+  await chrome.storage.local.set({ hermesBrowserSettings: settings, [activeMessagesStorageKey(previousConversationScope)]: [] });
   await saveSessionBindingForActiveScope(session);
   renderMessagesFromStorage();
   updateSessionLabel();
@@ -3120,6 +3346,7 @@ async function openHermesSession(session) {
     }
   }
   settings = { ...settings, sessionId: session.id, sessionTitle: session.title || session.id };
+  activeSessionRuntime = { ...activeSessionRuntime, sessionId: session.id, usedTokens: 0, inputTokens: 0, outputTokens: 0, model: '', provider: '', source: '' };
   sessionRoutesAvailable = true;
   await chrome.storage.local.set({ hermesBrowserSettings: settings });
   await saveSessionBindingForActiveScope(session);
@@ -3140,7 +3367,7 @@ async function loadSessionMessages(sessionId = settings.sessionId) {
         .map((message) => ({ role: message.role, content: coerceWsMessageContent(message.content), ts: Number(message.timestamp || message.ts || Date.now()) }))
         .filter((message) => message.content)
         .slice(-settings.maxLocalMessages);
-      await chrome.storage.local.set({ [activeMessagesStorageKey()]: messages });
+      await chrome.storage.local.set({ [activeMessagesStorageKey(previousConversationScope)]: messages });
       renderMessagesFromStorage();
     } catch (error) {
       addMessage('system', `Could not load session messages: ${error?.message || String(error)}`);
@@ -3152,12 +3379,13 @@ async function loadSessionMessages(sessionId = settings.sessionId) {
     const response = await apiFetch(`/api/sessions/${encodeSessionId(sessionId)}/messages`, { method: 'GET' });
     const payload = await readJsonResponse(response);
     if (!response.ok) throw new Error(payload?.error?.message || payload?.error || `Messages failed (${response.status})`);
+    if (payload.session) applySessionRuntimeSnapshot({ session: payload.session, sessionId: payload.session.id || sessionId, source: 'Hermes session' });
     const rows = Array.isArray(payload.data) ? payload.data : [];
     messages = rows
       .filter((message) => ['user', 'assistant', 'system'].includes(message.role) && message.content)
       .map((message) => ({ role: message.role, content: String(message.content), ts: Number(message.timestamp || Date.now()) }))
       .slice(-settings.maxLocalMessages);
-    await chrome.storage.local.set({ [activeMessagesStorageKey()]: messages });
+    await chrome.storage.local.set({ [activeMessagesStorageKey(previousConversationScope)]: messages });
     renderMessagesFromStorage();
   } catch (error) {
     addMessage('system', `Could not load session messages: ${error?.message || String(error)}`);
@@ -3199,14 +3427,22 @@ async function ensureDefaultBrowserSession({ focus = false } = {}) {
   await createHermesBrowserSession({ title: makeBrowserSessionTitle(), focus });
 }
 
-const THINKING_PLACEHOLDER = 'Thinking...';
+const THINKING_PLACEHOLDER = 'Hermes is thinking...';
+const THINKING_STATUSES = ['thinking', 'brainstorming', 'contemplating', 'reasoning', 'processing', 'analyzing', 'reflecting', 'pondering', 'deliberating', 'formulating'];
 
 function renderThinkingIndicator(element) {
+  const phrases = THINKING_STATUSES
+    .map((word) => `
+        <span class="thinking-line">
+          <span class="thinking-word">${escapeHtml(word)}</span>
+          <span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+        </span>
+      `.trim())
+    .join('');
   element.innerHTML = `
-    <span class="thinking-indicator" role="status" aria-live="polite" aria-label="Hermes is thinking">
-      <span class="thinking-glyph" aria-hidden="true"></span>
-      <span class="thinking-word">Thinking</span>
-      <span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+    <span class="thinking-indicator" role="status" aria-live="polite" aria-label="Hermes is thinking, brainstorming, contemplating, reasoning, processing, analyzing, reflecting, pondering, deliberating, and formulating">
+      <span class="thinking-glyph" aria-hidden="true">(o_o)</span>
+      <span class="thinking-words" aria-hidden="true">${phrases}</span>
     </span>
   `;
 }
@@ -3217,6 +3453,67 @@ function renderMessageContentElement(element, content = '') {
     return;
   }
   element.innerHTML = renderMarkdown(content || '');
+}
+
+function renderToolActivity(activity = {}) {
+  const category = activity.category || 'meta';
+  const root = document.createElement('div');
+  root.className = `tool-activity tool-kind-${category}`;
+  root.setAttribute('role', 'status');
+  root.setAttribute('aria-live', 'polite');
+  root.setAttribute('aria-label', `${activity.label || 'Using tool'}${activity.rawName ? `: ${activity.rawName}` : ''}`);
+
+  const head = document.createElement('div');
+  head.className = 'tool-activity-head';
+
+  const glyph = document.createElement('span');
+  glyph.className = `tool-activity-glyph tool-kind-${category}`;
+  glyph.setAttribute('aria-hidden', 'true');
+
+  const label = document.createElement('span');
+  label.className = 'tool-activity-label';
+  label.textContent = activity.label || 'Using tool';
+
+  const name = document.createElement('span');
+  name.className = 'tool-activity-name';
+  name.textContent = activity.rawName || 'Hermes tool';
+
+  head.append(glyph, label, name);
+  root.appendChild(head);
+
+  if (activity.preview) {
+    const preview = document.createElement('div');
+    preview.className = 'tool-activity-preview';
+    preview.textContent = activity.preview;
+    root.appendChild(preview);
+  }
+
+  const meter = document.createElement('div');
+  meter.className = 'tool-activity-meter';
+  meter.setAttribute('aria-hidden', 'true');
+  for (let index = 0; index < 4; index += 1) meter.appendChild(document.createElement('i'));
+  root.appendChild(meter);
+  return root;
+}
+
+function setToolActivity(node, activity = null) {
+  if (!node) return;
+  let slot = node.querySelector('.message-tool-activity');
+  if (!activity) {
+    slot?.remove();
+    return;
+  }
+  if (!slot) {
+    slot = document.createElement('div');
+    slot.className = 'message-tool-activity';
+    const content = node.querySelector('.message-content');
+    if (content?.nextSibling) node.insertBefore(slot, content.nextSibling);
+    else node.appendChild(slot);
+  }
+  slot.replaceChildren(renderToolActivity(activity));
+  requestAnimationFrame(() => {
+    els.appScroll.scrollTop = els.appScroll.scrollHeight;
+  });
 }
 
 function addMessage(role, content, { persist = true } = {}) {
@@ -3271,9 +3568,10 @@ function createStreamingMessageUpdater(node) {
       cancelAnimationFrame(frame);
       frame = 0;
     }
+    setToolActivity(node, null);
     setMessageContent(node, pending);
   };
-  const update = (content = '') => {
+  const updateText = (content = '') => {
     pending = content || '';
     if (frame) return;
     frame = requestAnimationFrame(() => {
@@ -3281,7 +3579,10 @@ function createStreamingMessageUpdater(node) {
       setMessageContent(node, pending || THINKING_PLACEHOLDER);
     });
   };
-  return { update, flush };
+  function updateTool(tool = null) {
+    setToolActivity(node, tool);
+  }
+  return { update: updateText, updateText, updateTool, flush };
 }
 
 async function trimAndSaveMessages() {
@@ -3292,7 +3593,7 @@ async function trimAndSaveMessages() {
 
 async function loadSettings() {
   loadContextScopeForInstance();
-  const messageKey = activeMessagesStorageKey();
+  const messageKey = activeMessagesStorageKey(previousConversationScope);
   const stored = await chrome.storage.local.get(['hermesBrowserSettings', messageKey]);
   const storedSettings = stored.hermesBrowserSettings || {};
   const migrateDesktopOptionDefaults = !storedSettings.modelOptionsVersion && storedSettings.reasoningEffort === 'medium';
@@ -3302,7 +3603,7 @@ async function loadSettings() {
     thinkingEnabled: settings.thinkingEnabled !== false,
     gatewayMode: normalizeGatewayMode(settings.gatewayMode),
     gatewayUrl: normalizeGatewayUrl(settings.gatewayUrl),
-    fastMode: Boolean(settings.fastMode),
+    fastMode: normalizeFastMode(settings.fastMode),
     reasoningEffort: migrateDesktopOptionDefaults ? DEFAULT_SETTINGS.reasoningEffort : normalizeReasoningEffort(settings.reasoningEffort),
     modelOptionsVersion: DEFAULT_SETTINGS.modelOptionsVersion,
     agentDiscoveryHost: normalizeAgentDiscoveryHost(settings.agentDiscoveryHost || DEFAULT_SETTINGS.agentDiscoveryHost),
@@ -3789,6 +4090,18 @@ function markGatewayUnreachable(error) {
   scheduleConnectionProbe();
 }
 
+function markGatewayDegraded(error) {
+  const diagnostic = classifyGatewayError(error);
+  markConnectionProbe('degraded', diagnostic.kind === 'unknown' ? (error?.message || String(error || 'Gateway degraded')) : gatewayConnectionTroubleshooting({
+    gatewayMode: settings.gatewayMode,
+    gatewayUrl: settings.gatewayUrl,
+    state: 'degraded',
+    probeDetail: error?.message || String(error || ''),
+  }));
+  scheduleConnectionProbe();
+  return diagnostic;
+}
+
 async function ensureHermesSession() {
   if (sessionRoutesAvailable === false || gatewayCapabilities.sessions === false || gatewayCapabilities.sessionChat === false) return false;
   const sessionPath = `/api/sessions/${encodeSessionId(settings.sessionId)}`;
@@ -3869,7 +4182,7 @@ function textFromRunCompleted(data = {}) {
 }
 
 
-async function readSseResponse(response, onDelta, onTool, { signal, onRun } = {}) {
+async function readSseResponse(response, onDelta, onTool, { signal, onRun, onSteerQueued, onRuntime } = {}) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -3887,11 +4200,14 @@ async function readSseResponse(response, onDelta, onTool, { signal, onRun } = {}
       finalText = finalText || data.content;
       onDelta(finalText);
     } else if (event.type === 'run.completed') {
+      onRuntime?.(data);
       const completedText = textFromRunCompleted(data);
       if (completedText) {
         finalText = completedText;
         onDelta(finalText);
       }
+    } else if (event.type === 'steer.queued' && data.text) {
+      onSteerQueued?.(data.text);
     } else if (event.type === 'chat.completion.chunk' || event.type === 'message') {
       const nextText = appendOpenAiChunkText(event, finalText);
       if (nextText !== finalText) {
@@ -3942,6 +4258,16 @@ function currentModelRequestId() {
 function currentModelProviderSlug() {
   const selected = currentSelectedModel();
   return selected?.provider || '';
+}
+
+function applyTurnRuntimePayload(payload = {}) {
+  if (!payload || typeof payload !== 'object') return;
+  applySessionRuntimeSnapshot({
+    sessionId: payload.session_id || payload.sessionId || settings.sessionId,
+    usage: payload.usage,
+    runtime: payload.runtime,
+    source: 'Hermes turn',
+  });
 }
 
 async function ensureRemoteWsClient() {
@@ -3995,7 +4321,7 @@ async function ensureRemoteWsSession(connection) {
   const result = await connection.client.request(WS_METHODS.sessionCreate, {
     title: settings.sessionTitle,
     reasoning_effort: normalizeReasoningEffort(settings.reasoningEffort),
-    fast: Boolean(settings.fastMode),
+    fast: normalizeFastMode(settings.fastMode),
   });
   connection.wsSessionId = result?.session_id || '';
   if (!connection.wsSessionId) throw new Error('Dashboard did not return a session id.');
@@ -4074,7 +4400,7 @@ async function streamRemoteWsChat(prompt, onDelta, onTool, { signal, onRun } = {
   });
 }
 
-async function streamSessionChat(prompt, onDelta, onTool, { signal, attachments: turnAttachments = attachments, onRun } = {}) {
+async function streamSessionChat(prompt, onDelta, onTool, { signal, attachments: turnAttachments = attachments, onRun, onSteerQueued, onRuntime } = {}) {
   if (isRemoteWsMode()) return streamRemoteWsChat(prompt, onDelta, onTool, { signal, onRun });
   const hasSessionRoutes = await ensureHermesSession();
   if (!hasSessionRoutes) return streamChatCompletions(prompt, onDelta, onTool, { signal, attachments: turnAttachments, onRun });
@@ -4095,7 +4421,7 @@ async function streamSessionChat(prompt, onDelta, onTool, { signal, attachments:
     const text = await response.text();
     throw new Error(`Hermes stream failed (${response.status}): ${text.slice(0, 900)}`);
   }
-  return readSseResponse(response, onDelta, onTool, { signal, onRun });
+  return readSseResponse(response, onDelta, onTool, { signal, onRun, onSteerQueued, onRuntime });
 }
 
 async function streamChatCompletions(prompt, onDelta, onTool, { signal, attachments: turnAttachments = attachments, onRun } = {}) {
@@ -4234,7 +4560,7 @@ async function connectToHermes() {
   }
 }
 
-async function fallbackSessionChat(prompt, turnAttachments = attachments) {
+async function fallbackSessionChat(prompt, turnAttachments = attachments, { onRuntime } = {}) {
   const hasSessionRoutes = await ensureHermesSession();
   if (!hasSessionRoutes) return fallbackChatCompletions(prompt, turnAttachments);
 
@@ -4250,6 +4576,7 @@ async function fallbackSessionChat(prompt, turnAttachments = attachments) {
   });
   const payload = await readJsonResponse(response);
   if (!response.ok) throw new Error(payload?.error?.message || payload?.error || `Hermes request failed (${response.status})`);
+  onRuntime?.(payload);
   return extractAssistantText(payload);
 }
 
@@ -4349,15 +4676,17 @@ async function askHermes(userText, turnAttachments = [...attachments]) {
         prompt,
         (partial) => {
           liveText = partial || '';
-          streamView.update(liveText || THINKING_PLACEHOLDER);
+          streamView.updateText(liveText || THINKING_PLACEHOLDER);
         },
-        (tool) => streamView.update(`${liveText || 'Working...'}\n\n[tool] ${tool.tool_name || tool.tool || 'Hermes tool'} ${tool.preview || ''}`.trim()),
+        (tool) => streamView.updateTool(normalizeToolActivity(tool)),
         {
           signal: activeAbortController.signal,
           attachments: preparedAttachments,
           onRun: (runId) => {
             activeRunId = runId;
           },
+          onSteerQueued: restoreBackendQueuedSteerDraft,
+          onRuntime: applyTurnRuntimePayload,
         },
       );
     } catch (streamError) {
@@ -4370,7 +4699,7 @@ async function askHermes(userText, turnAttachments = [...attachments]) {
         throw streamError;
       } else {
         streamView.update(`Streaming failed, retrying non-streaming...\n${streamError.message}`);
-        answer = await fallbackSessionChat(prompt, preparedAttachments);
+        answer = await fallbackSessionChat(prompt, preparedAttachments, { onRuntime: applyTurnRuntimePayload });
       }
     }
     const finalAnswer = answer || liveText || '(empty response)';
@@ -4381,16 +4710,28 @@ async function askHermes(userText, turnAttachments = [...attachments]) {
     await loadSessions({ quiet: true });
     didSend = true;
   } catch (error) {
-    if (!isAbortError(error)) markGatewayUnreachable(error);
-    addMessage('system', `Hermes Browser Extension error: ${error?.message || String(error)}`);
+    if (!isAbortError(error)) {
+      const diagnostic = classifyGatewayError(error);
+      if (diagnostic.probeStatus === 'degraded') {
+        markGatewayDegraded(error);
+      } else {
+        markGatewayUnreachable(error);
+      }
+      addMessage('system', diagnostic.kind === 'unknown'
+        ? `Hermes Browser Extension error: ${error?.message || String(error)}`
+        : `Hermes Browser Extension warning: ${diagnostic.userMessage}`);
+    } else {
+      addMessage('system', `Hermes Browser Extension error: ${error?.message || String(error)}`);
+    }
   } finally {
     activeAbortController = null;
     activeRunId = '';
+    pendingSteerText = '';
     sending = false;
     updateComposerBusyState();
     renderContextWindow();
     els.input.focus();
-    shouldFlushQueue = Boolean(queuedTurn);
+    shouldFlushQueue = shouldAutoFlushQueuedTurn(queuedTurn);
   }
   if (shouldFlushQueue) {
     const next = queuedTurn;
@@ -4455,21 +4796,37 @@ async function testConnection() {
 
     const modelsResponse = await apiFetch('/v1/models', { method: 'GET' });
     const modelsPayload = await readJsonResponse(modelsResponse);
-    if (!modelsResponse.ok) throw new Error(`Health OK, auth/model probe failed (${modelsResponse.status}): ${JSON.stringify(modelsPayload).slice(0, 500)}`);
-    await loadModels({ quiet: true });
+    let degradedDiagnostic = null;
+    if (!modelsResponse.ok) {
+      const diagnostic = classifyGatewayError(`Health OK, auth/model probe failed (${modelsResponse.status}): ${JSON.stringify(modelsPayload).slice(0, 500)}`);
+      if (diagnostic.probeStatus === 'degraded') {
+        degradedDiagnostic = diagnostic;
+      } else {
+        throw new Error(`Health OK, auth/model probe failed (${modelsResponse.status}): ${JSON.stringify(modelsPayload).slice(0, 500)}`);
+      }
+    } else {
+      await loadModels({ quiet: true });
+    }
     await loadSkills({ quiet: true });
     await loadProfiles({ quiet: true });
 
     const hasSessionRoutes = await ensureHermesSession();
-    setStatus(
-      'ok',
-      hasSessionRoutes ? 'Hermes gateway + session API connected' : 'Hermes gateway connected',
-      hasSessionRoutes ? normalizeGatewayUrl(settings.gatewayUrl) : `${normalizeGatewayUrl(settings.gatewayUrl)} - OpenAI-compatible fallback mode`,
-    );
-    markGatewayReachable(normalizeGatewayUrl(settings.gatewayUrl));
+    if (degradedDiagnostic) {
+      setStatus('warn', 'Hermes gateway connected with runtime warning', degradedDiagnostic.detail);
+      markGatewayDegraded(degradedDiagnostic.detail);
+    } else {
+      setStatus(
+        'ok',
+        hasSessionRoutes ? 'Hermes gateway + session API connected' : 'Hermes gateway connected',
+        hasSessionRoutes ? normalizeGatewayUrl(settings.gatewayUrl) : `${normalizeGatewayUrl(settings.gatewayUrl)} - OpenAI-compatible fallback mode`,
+      );
+      markGatewayReachable(normalizeGatewayUrl(settings.gatewayUrl));
+    }
+
     settings = { ...settings, lastConnectionTestedAt: Date.now() };
     await chrome.storage.local.set({ hermesBrowserSettings: settings });
     renderConnectionSecurity();
+
     ok = true;
   } catch (error) {
     markGatewayUnreachable(error);
@@ -4637,7 +4994,7 @@ function bindEvents() {
     if (toggle) {
       const key = toggle.dataset.toggle;
       if (key === 'thinking') setModelRuntimeOption('thinkingEnabled', settings.thinkingEnabled === false);
-      if (key === 'fast') setModelRuntimeOption('fastMode', !settings.fastMode);
+      if (key === 'fast') setModelRuntimeOption('fastMode', !normalizeFastMode(settings.fastMode));
       return;
     }
     const effort = event.target.closest('[data-effort]');
@@ -4757,7 +5114,14 @@ function bindEvents() {
   els.composer.addEventListener('submit', async (event) => {
     event.preventDefault();
     if (sending) {
-      queueCurrentDraft();
+      const action = busyComposerSubmitAction({
+        sending,
+        draftText: els.input.value,
+        attachmentCount: attachments.length,
+        canSteer: canSteerActiveRun(),
+      });
+      if (action === 'steer') await steerCurrentDraft();
+      else if (action === 'queue') queueCurrentDraft();
       return;
     }
     const userText = els.input.value.trim();
@@ -4838,7 +5202,7 @@ function bindEvents() {
       const tabId = Number(promptToggle.dataset.promptTabToggle);
       const tab = (currentContext.tabs || []).find((item) => Number(item.id) === tabId);
       togglePromptTabSelection(tab);
-      renderContextScopeMenu(currentContextScopeSearchQuery(), { focusSearch: true });
+      rerenderContextScopePromptSelectionPreservingScroll(currentContextScopeSearchQuery());
       return;
     }
 
@@ -4847,18 +5211,18 @@ function bindEvents() {
     const action = button.dataset.scopeAction || '';
     if (action === 'prompt-tabs-all') {
       setPromptTabsSelection(null);
-      renderContextScopeMenu(currentContextScopeSearchQuery(), { focusSearch: true });
+      rerenderContextScopePromptSelectionPreservingScroll(currentContextScopeSearchQuery());
       return;
     }
     if (action === 'prompt-tabs-none') {
       setPromptTabsSelection([]);
-      renderContextScopeMenu(currentContextScopeSearchQuery(), { focusSearch: true });
+      rerenderContextScopePromptSelectionPreservingScroll(currentContextScopeSearchQuery());
       return;
     }
 
     els.contextScopeMenu.hidden = true;
     if (action === 'chat-only') {
-      applyContextScope({ mode: CONTEXT_SCOPE_MODES.CHAT_ONLY }, { ensureSession: true })
+      applyContextScope({ mode: CONTEXT_SCOPE_MODES.CHAT_ONLY }, { ensureSession: false })
         .catch((error) => setStatus('warn', 'Could not switch to Chat only', error?.message || String(error)));
       return;
     }

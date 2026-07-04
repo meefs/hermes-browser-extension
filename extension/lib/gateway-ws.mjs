@@ -17,6 +17,7 @@ export const WS_METHODS = Object.freeze({
   sessionInfo: 'session.info',
   promptSubmit: 'prompt.submit',
   sessionInterrupt: 'session.interrupt',
+  sessionSteer: 'session.steer',
   modelOptions: 'model.options',
 });
 

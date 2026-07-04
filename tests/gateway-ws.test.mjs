@@ -5,6 +5,7 @@ import {
   buildDashboardWsUrl,
   classifyGatewayFrame,
   createGatewayClient,
+  WS_METHODS,
 } from '../extension/lib/gateway-ws.mjs';
 
 class FakeWebSocket {
@@ -52,6 +53,11 @@ test('buildDashboardWsUrl upgrades scheme, keeps path prefix, encodes ticket', (
     buildDashboardWsUrl('http://127.0.0.1:8642/hermes/', 't1'),
     'ws://127.0.0.1:8642/hermes/api/ws?ticket=t1',
   );
+});
+
+test('WS_METHODS exposes Desktop/TUI session steering instead of slash-command injection', () => {
+  assert.equal(WS_METHODS.sessionSteer, 'session.steer');
+  assert.equal(WS_METHODS.promptSubmit, 'prompt.submit');
 });
 
 test('classifyGatewayFrame distinguishes responses, errors, events, and noise', () => {

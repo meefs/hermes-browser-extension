@@ -12,10 +12,13 @@ import {
   buildAudioTranscriptionBody,
   buildHermesModelOptions,
   buildHermesPrompt,
+  busyComposerSubmitAction,
   clampText,
+  classifyGatewayError,
   collectReadablePageText,
   composerControlState,
   contextChipSummary,
+
   estimateContextWindow,
   extractAssistantText,
   formatContextMeter,
@@ -37,6 +40,7 @@ import {
   normalizeHermesProfiles,
   normalizeHermesSessions,
   normalizeHermesSkills,
+  normalizeFastMode,
   pairingFailureMessage,
   privacySafeTabForPrompt,
   queuedMessageControlState,
@@ -49,6 +53,7 @@ import {
   shouldFallbackToWebSpeechForTranscription,
   shouldSubmitComposerKey,
   shouldAutoOpenSessionGroup,
+  shouldAutoFlushQueuedTurn,
   summarizeTabs,
   compareVersionStrings,
   autoSessionTitleFromText,
@@ -60,6 +65,10 @@ import {
   normalizeExtensionVersion,
   normalizeGitCommit,
   shortGitCommit,
+  toolCategoryForName,
+  toolLabelForName,
+  sanitizeToolPreview,
+  normalizeToolActivity,
 } from '../extension/lib/common.mjs';
 import {
   extractYouTubeVideoId,
@@ -67,6 +76,26 @@ import {
   parseTimedTextXml,
   providerUrlForVideo,
 } from '../extension/lib/transcript.mjs';
+import {
+  CONTEXT_SCOPE_MODES,
+  messageStorageKeyForScope,
+  sessionBindingKeyForScope,
+  tabScopeId,
+} from '../extension/lib/context-scope.mjs';
+
+test('side panel defaults to full Hermes tool access instead of read-only/no-tool mode', () => {
+  const source = readFileSync(new URL('../extension/sidepanel.js', import.meta.url), 'utf8');
+  const common = readFileSync(new URL('../extension/lib/common.mjs', import.meta.url), 'utf8');
+
+  assert.doesNotMatch(common, /This v0\.1 extension is read-only/);
+  assert.doesNotMatch(common, /only has access to the active tab/i);
+  assert.match(common, /full Hermes Agent surface/i);
+  assert.match(common, /file, terminal, web, computer, and browser tools/i);
+
+  assert.doesNotMatch(source, /const HERMES_BROWSER_AGENT_OPTIONS = \{/);
+  assert.doesNotMatch(source, /enabled_toolsets:\s*\[\]/);
+  assert.doesNotMatch(source, /agent_options:\s*HERMES_BROWSER_AGENT_OPTIONS/);
+});
 
 test('redactSensitiveText masks obvious tokens and password assignments', () => {
   const bearer = ['tok', 'en', 'part'].join('.');
@@ -116,12 +145,97 @@ test('redactSensitiveText masks provider token shapes and quoted secret values',
   assert.equal(redactSensitiveText('The quick brown fox jumps over the lazy dog.'), 'The quick brown fox jumps over the lazy dog.');
 });
 
+test('tool activity helpers categorize, label, and sanitize tool previews', () => {
+  assert.equal(toolCategoryForName('read_file'), 'file');
+  assert.equal(toolCategoryForName('search_files'), 'file');
+  assert.equal(toolCategoryForName('patch'), 'edit');
+  assert.equal(toolCategoryForName('write_file'), 'edit');
+  assert.equal(toolCategoryForName('terminal'), 'terminal');
+  assert.equal(toolCategoryForName('execute_code'), 'terminal');
+  assert.equal(toolCategoryForName('mcp_playwright_browser_click'), 'browser');
+  assert.equal(toolCategoryForName('browser_snapshot'), 'browser');
+  assert.equal(toolCategoryForName('computer_use'), 'browser');
+  assert.equal(toolCategoryForName('web_search'), 'web');
+  assert.equal(toolCategoryForName('x_search'), 'web');
+  assert.equal(toolCategoryForName('vision_analyze'), 'media');
+  assert.equal(toolCategoryForName('image_generate'), 'media');
+  assert.equal(toolCategoryForName('todo'), 'meta');
+  assert.equal(toolCategoryForName('delegate_task'), 'meta');
+  assert.equal(toolCategoryForName('unknown_tool'), 'meta');
+
+  assert.equal(toolLabelForName('read_file'), 'Reading file');
+  assert.equal(toolLabelForName('patch'), 'Patching file');
+  assert.equal(toolLabelForName('terminal'), 'Running command');
+  assert.equal(toolLabelForName('mcp_chrome_devtools_take_snapshot'), 'Inspecting page');
+  assert.equal(toolLabelForName('web_search'), 'Searching web');
+  assert.equal(toolLabelForName('image_generate'), 'Generating image');
+  assert.equal(toolLabelForName('memory'), 'Saving memory');
+
+  const leaked = sanitizeToolPreview('Authorization: Bearer secret-token OPENAI_API_KEY=sk-test-1234567890abcdef');
+  assert.match(leaked, /Bearer \[REDACTED_BEARER\]/);
+  assert.match(leaked, /OPENAI_API_KEY=\[REDACTED_SECRET\]/);
+  assert.doesNotMatch(leaked, /secret-token|sk-test/);
+
+  const longPreview = sanitizeToolPreview('x'.repeat(140), 24);
+  assert.equal(longPreview.length <= 24, true);
+  assert.match(longPreview, /…/);
+
+  const normalized = normalizeToolActivity({ tool_name: 'read_file', preview: '/workspace/hermes-browser-extension/README.md' });
+  assert.equal(normalized.rawName, 'read_file');
+  assert.equal(normalized.category, 'file');
+  assert.equal(normalized.label, 'Reading file');
+  assert.match(normalized.preview, /README\.md/);
+  assert.equal(typeof normalized.ts, 'number');
+});
+
 test('pairingFailureMessage explains a missing pairing route instead of a bare 404', () => {
   const message = pairingFailureMessage(404, { error: '404: Not Found' });
   assert.match(message, /Manual setup/);
   assert.doesNotMatch(message, /404: Not Found/);
   assert.equal(pairingFailureMessage(403, { error: 'forbidden' }), 'forbidden');
   assert.equal(pairingFailureMessage(503, {}), 'Pairing failed (503)');
+});
+
+test('gateway diagnostics classify upstream runtime, auth, CORS, and missing route failures', () => {
+  const upstream = classifyGatewayError(new Error("int() argument must be a string, a bytes-like object or a real number, not 'NoneType'"));
+  assert.equal(upstream.kind, 'upstream-runtime');
+  assert.equal(upstream.probeStatus, 'degraded');
+  assert.match(upstream.title, /runtime exception/i);
+  assert.match(upstream.detail, /upstream Hermes Agent/i);
+  assert.match(upstream.detail, /computer_use/i);
+  assert.match(upstream.userMessage, /gateway traceback/i);
+  assert.doesNotMatch(upstream.userMessage, /api\/model\/options/i);
+
+  const auth = classifyGatewayError('401: Unauthorized');
+  assert.equal(auth.kind, 'auth');
+  assert.equal(auth.probeStatus, 'unreachable');
+  assert.match(auth.detail, /API token/i);
+
+  const cors = classifyGatewayError('TypeError: Failed to fetch because CORS blocked the request');
+  assert.equal(cors.kind, 'network-cors');
+  assert.match(cors.detail, /CORS/i);
+
+  const missing = classifyGatewayError('404: Not Found');
+  assert.equal(missing.kind, 'route-missing');
+  assert.match(missing.detail, /route/i);
+});
+
+test('connection diagnostics can represent connected-but-degraded optional failures', () => {
+  assert.deepEqual(connectionStateForGateway({
+    gatewayMode: 'local-api',
+    gatewayUrl: 'http://127.0.0.1:8642',
+    apiKey: 'token',
+    probeStatus: 'degraded',
+  }), { state: 'degraded', connected: true, pillClass: 'warn' });
+
+  const copy = gatewayConnectionTroubleshooting({
+    gatewayMode: 'local-api',
+    gatewayUrl: 'http://127.0.0.1:8642',
+    state: 'degraded',
+    probeDetail: "int() argument must be a string, a bytes-like object or a real number, not 'NoneType'",
+  });
+  assert.match(copy, /Hermes API server is reachable/i);
+  assert.match(copy, /upstream Hermes Agent/i);
 });
 
 test('clampText preserves short text and clearly marks truncation', () => {
@@ -395,6 +509,53 @@ test('queued message controls allow delete anytime and steer only when runnable 
   assert.equal(queuedMessageControlState({ sending: true, text: '   ' }).delete.disabled, false);
 });
 
+test('composer submit steers active text by default while preserving explicit queue fallback', () => {
+  assert.equal(busyComposerSubmitAction({ sending: true, draftText: 'tighten this now', canSteer: true }), 'steer');
+  assert.equal(busyComposerSubmitAction({ sending: true, draftText: 'send later', canSteer: false }), 'queue');
+  assert.equal(busyComposerSubmitAction({ sending: true, draftText: 'text plus image', attachmentCount: 1, canSteer: true }), 'queue');
+  assert.equal(busyComposerSubmitAction({ sending: true, draftText: '', attachmentCount: 1, canSteer: true }), 'queue');
+  assert.equal(busyComposerSubmitAction({ sending: true, draftText: '   ', attachmentCount: 0, canSteer: true }), 'ignore');
+  assert.equal(busyComposerSubmitAction({ sending: false, draftText: 'normal turn', canSteer: true }), 'send');
+});
+
+test('backend queued steer fallbacks never auto-flush as normal queued prompts', () => {
+  assert.equal(shouldAutoFlushQueuedTurn({ text: 'send next', attachments: [], kind: 'queued' }), true);
+  assert.equal(shouldAutoFlushQueuedTurn({ text: 'use this guidance', attachments: [], kind: 'steer-fallback', autoSend: false }), false);
+  assert.equal(shouldAutoFlushQueuedTurn(null), false);
+
+  const source = readFileSync(new URL('../extension/sidepanel.js', import.meta.url), 'utf8');
+  assert.match(source, /busyComposerSubmitAction\(/);
+  assert.match(source, /restoreBackendQueuedSteerDraft/);
+  assert.match(source, /let pendingSteerText = ''/, 'steer success must wait until the stream proves the steer was not queued back');
+  assert.match(source, /pendingSteerText = steerText/, 'steer attempts should be tracked until stream confirmation or queued fallback');
+  assert.match(source, /pendingSteerText = ''[\s\S]*setStatus\('warn', 'Steer not injected'/, 'queued steer events should clear optimistic success and show not-injected status');
+  assert.doesNotMatch(source, /if \(sending\) \{\s*queueCurrentDraft\(\);\s*return;\s*\}/);
+  assert.match(source, /shouldAutoFlushQueuedTurn\(queuedTurn\)/);
+});
+
+test('chat-only context keeps the existing session and transcript scope', () => {
+  const pinnedScope = {
+    mode: CONTEXT_SCOPE_MODES.PINNED_TAB,
+    pinnedTabId: 42,
+    pinnedTitle: 'Pricing page',
+    pinnedUrl: 'https://example.com/pricing',
+  };
+  const chatOnlyScope = {
+    ...pinnedScope,
+    mode: CONTEXT_SCOPE_MODES.CHAT_ONLY,
+  };
+
+  assert.equal(tabScopeId(chatOnlyScope, pinnedScope), 'tab:42');
+  assert.equal(messageStorageKeyForScope(chatOnlyScope, pinnedScope), messageStorageKeyForScope(pinnedScope));
+  assert.equal(sessionBindingKeyForScope(chatOnlyScope, pinnedScope), sessionBindingKeyForScope(pinnedScope));
+
+  const source = readFileSync(new URL('../extension/sidepanel.js', import.meta.url), 'utf8');
+  assert.match(source, /previousConversationScope = conversationScopeForContextScope\(contextScope, previousConversationScope\)/);
+  assert.match(source, /activeMessagesStorageKey\(previousConversationScope\)/);
+  assert.match(source, /applyContextScope\(\{ mode: CONTEXT_SCOPE_MODES\.CHAT_ONLY \}, \{ ensureSession: false \}\)/);
+  assert.doesNotMatch(source, /applyContextScope\(\{ mode: CONTEXT_SCOPE_MODES\.CHAT_ONLY \}, \{ ensureSession: true \}\)/);
+});
+
 test('busy composer hides mic and uses compact queue/steer icon spacing', () => {
   const css = readFileSync(new URL('../extension/sidepanel.css', import.meta.url), 'utf8');
   const source = readFileSync(new URL('../extension/sidepanel.js', import.meta.url), 'utf8');
@@ -460,6 +621,11 @@ test('connect and startup sync Hermes models, sessions, skills, and profiles fro
   const source = readFileSync(new URL('../extension/sidepanel.js', import.meta.url), 'utf8');
   assert.match(source, /await loadModels\(\{ quiet: true \}\);\s*await loadSkills\(\{ quiet: true \}\);\s*await loadProfiles\(\{ quiet: true \}\);\s*await loadSessions\(\{ quiet: true \}\);\s*await ensureDefaultBrowserSession\(\{ focus: false \}\);/s);
   assert.match(source, /apiFetch\('\/v1\/models'/);
+  assert.ok(
+    source.indexOf('discoverModelsFromRegistry({ apiFetch, readJsonResponse, refresh })') > -1
+      && source.indexOf('discoverModelsFromRegistry({ apiFetch, readJsonResponse, refresh })') < source.indexOf('discoverModelsFromDashboard({'),
+    'connected API /api/model/options must be tried before dashboard scraping',
+  );
   assert.match(source, /discoverModelsFromDashboard\(\{/);
   assert.match(source, /profile: settings\.activeProfile/);
   assert.match(source, /dashboardModelDiscoveryBaseUrl\(\{/);
@@ -469,6 +635,21 @@ test('connect and startup sync Hermes models, sessions, skills, and profiles fro
   assert.match(source, /apiFetch\('\/v1\/profiles'/);
   assert.match(source, /apiFetch\(`\/api\/sessions\?limit=\$\{limit\}&offset=\$\{offset\}&include_children=true&order=recent`/);
   assert.match(source, /els\.refreshModelsButton\.addEventListener\('click', refreshModelsFromMenu\)/);
+});
+
+test('sidepanel steers dashboard runs through session.steer instead of slash-command prompt injection', () => {
+  const source = readFileSync(new URL('../extension/sidepanel.js', import.meta.url), 'utf8');
+  assert.match(source, /WS_METHODS\.sessionSteer/);
+  assert.doesNotMatch(source, /text:\s*`\/steer \$\{steerText\}`/);
+});
+
+test('sidepanel restores backend-queued steer text without auto-sending it as a next prompt', () => {
+  const source = readFileSync(new URL('../extension/sidepanel.js', import.meta.url), 'utf8');
+  assert.match(source, /event\.type === 'steer\.queued'/);
+  assert.match(source, /onSteerQueued\?\.\(data\.text\)/);
+  assert.match(source, /restoreBackendQueuedSteerDraft/);
+  assert.doesNotMatch(source, /queueBackendSteerFollowup/);
+  assert.doesNotMatch(source, /Steer queued as next turn/);
 });
 
 test('model refresh control exposes compact loading state while syncing', () => {
@@ -496,14 +677,52 @@ test('model refresh control exposes compact loading state while syncing', () => 
 test('assistant thinking placeholder renders animated indicator markup and reduced-motion CSS', () => {
   const source = readFileSync(new URL('../extension/sidepanel.js', import.meta.url), 'utf8');
   const css = readFileSync(new URL('../extension/sidepanel.css', import.meta.url), 'utf8');
-  assert.match(source, /const THINKING_PLACEHOLDER = 'Thinking\.\.\.'/);
+  assert.match(source, /const THINKING_PLACEHOLDER = 'Hermes is thinking\.\.\.'/);
+  assert.match(source, /const THINKING_STATUSES = \['thinking', 'brainstorming', 'contemplating', 'reasoning', 'processing', 'analyzing', 'reflecting', 'pondering', 'deliberating', 'formulating'\]/);
   assert.match(source, /function renderThinkingIndicator/);
-  assert.match(source, /class="thinking-indicator" role="status" aria-live="polite"/);
-  assert.match(source, /streamView\.update\(liveText \|\| THINKING_PLACEHOLDER\)/);
-  assert.match(css, /\.thinking-word[\s\S]*animation: thinkingWordGlow/);
+  assert.match(source, /class="thinking-indicator" role="status" aria-live="polite" aria-label="Hermes is thinking, brainstorming, contemplating, reasoning, processing, analyzing, reflecting, pondering, deliberating, and formulating"/);
+  assert.match(source, /<span class="thinking-glyph" aria-hidden="true">\(o_o\)<\/span>/);
+  assert.match(source, /<span class="thinking-line">/);
+  assert.match(source, /<span class="thinking-word">\$\{escapeHtml\(word\)\}<\/span>/);
+  assert.match(source, /<span class="thinking-dots" aria-hidden="true"><i><\/i><i><\/i><i><\/i><\/span>/);
+  assert.match(source, /<span class="thinking-words" aria-hidden="true">\$\{phrases\}<\/span>/);
+  assert.match(source, /streamView\.updateText\(liveText \|\| THINKING_PLACEHOLDER\)/);
+  assert.match(css, /\.thinking-indicator[\s\S]*overflow: hidden/);
+  assert.match(css, /\.thinking-words[\s\S]*overflow: hidden/);
+  assert.match(css, /\.thinking-words[\s\S]*height: 1\.46em/);
+  assert.match(css, /\.thinking-line[\s\S]*display: inline-flex/);
+  assert.match(css, /\.thinking-line[\s\S]*gap: 4px/);
+  assert.match(css, /thinkingWordCycle 24s/);
+  assert.match(css, /\.thinking-line:nth-child\(10\)/);
   assert.match(css, /@keyframes thinkingPulse/);
+  assert.match(css, /@keyframes thinkingWordCycle/);
   assert.match(css, /@keyframes thinkingUnderline/);
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)/);
+});
+
+test('tool activity strip is wired as runtime UI instead of raw tool markdown', () => {
+  const source = readFileSync(new URL('../extension/sidepanel.js', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../extension/sidepanel.css', import.meta.url), 'utf8');
+  assert.match(source, /normalizeToolActivity/);
+  assert.match(source, /function renderToolActivity/);
+  assert.match(source, /function setToolActivity/);
+  assert.match(source, /updateTool\(tool/);
+  assert.match(source, /streamView\.updateTool\(normalizeToolActivity\(tool\)\)/);
+  assert.doesNotMatch(source, /\\n\\n\[tool\]/);
+  assert.match(css, /\.tool-activity\b/);
+  for (const category of ['file', 'edit', 'terminal', 'browser', 'web', 'media', 'meta']) {
+    assert.match(css, new RegExp(`\\.tool-kind-${category}\\b`));
+  }
+  assert.match(css, /@keyframes toolScan/);
+  assert.match(css, /@keyframes toolStitch/);
+  assert.match(css, /@keyframes toolCursor/);
+  assert.match(css, /@keyframes toolReticle/);
+  assert.match(css, /@keyframes toolOrbit/);
+  assert.match(css, /@keyframes toolPixel/);
+  assert.match(css, /@keyframes toolStack/);
+  assert.match(css, /\.tool-activity-glyph[\s\S]*overflow: hidden/);
+  assert.doesNotMatch(css, /\.tool-kind-web \.tool-activity-meter i \{ animation-name: toolOrbit; \}/);
+  assert.match(css, /\.tool-activity \*/);
 });
 
 test('renderMarkdown produces safe rich text for headings, lists, tables, and links', () => {
@@ -543,7 +762,15 @@ test('normalizeHermesModels does not keep default hermes-agent fallback when rea
 
 test('normalizeHermesModels applies curated context fallback when provider rows omit limits', () => {
   const models = normalizeHermesModels({ data: [{ id: 'minimax:MiniMax-M3', name: 'MiniMax-M3', context_length: 0 }] }, 'minimax:MiniMax-M3');
-  assert.equal(models[0].contextTokens, 1_000_000);
+  assert.equal(models[0].contextTokens, 1000000);
+});
+
+test('normalizeHermesModels uses provider-aware GPT-5.5 context fallbacks', () => {
+  const codexModels = normalizeHermesModels({ data: [{ id: 'openai-codex::gpt-5.5', rawModelId: 'gpt-5.5', provider: 'openai-codex', context_length: 0 }] }, 'openai-codex::gpt-5.5');
+  assert.equal(codexModels[0].contextTokens, 272000);
+
+  const openRouterModels = normalizeHermesModels({ data: [{ id: 'openrouter::openai/gpt-5.5', rawModelId: 'openai/gpt-5.5', provider: 'openrouter', context_length: 0 }] }, 'openrouter::openai/gpt-5.5');
+  assert.equal(openRouterModels[0].contextTokens, 1050000);
 });
 
 test('buildHermesModelOptions maps Browser thinking, effort, and fast controls to Hermes runtime options', () => {
@@ -571,6 +798,21 @@ test('buildHermesModelOptions maps Browser thinking, effort, and fast controls t
     service_tier: null,
     fast: false,
   });
+  assert.deepEqual(buildHermesModelOptions({ ...DEFAULT_SETTINGS, fastMode: 'false' }), {
+    reasoning: { enabled: true, effort: 'xhigh' },
+    reasoning_effort: 'xhigh',
+    service_tier: null,
+    fast: false,
+  });
+  assert.deepEqual(buildHermesModelOptions({ ...DEFAULT_SETTINGS, fastMode: 'true' }), {
+    reasoning: { enabled: true, effort: 'xhigh' },
+    reasoning_effort: 'xhigh',
+    service_tier: 'priority',
+    fast: true,
+  });
+  assert.equal(normalizeFastMode('false'), false);
+  assert.equal(normalizeFastMode('off'), false);
+  assert.equal(normalizeFastMode('priority'), true);
 });
 
 test('estimateContextWindow reports estimated token usage and context parts', () => {
@@ -699,11 +941,16 @@ test('groupModelsForMenu groups connected Hermes models by provider and filters 
 
 test('normalizeHermesSessions and groupSessionsForMenu mirror Hermes Desktop source groups', () => {
   const sessions = normalizeHermesSessions({ data: [
-    { id: 'api_1', title: 'Reply with exactly OK.', source: 'api_server', last_active: 30, message_count: 2 },
+    { id: 'api_1', title: 'Reply with exactly OK.', source: 'api_server', last_active: 30, message_count: 2, model: 'qwen3.7-plus', input_tokens: 1200, output_tokens: 340, cache_read_tokens: 50, reasoning_tokens: 10 },
     { id: 'hb_1', title: 'Hermes Browser Extension', source: 'hermes_browser', last_active: 40, message_count: 1 },
     { id: 'tg_1', title: 'Telegram thread', source: 'telegram', last_active: 20, message_count: 10 },
   ] });
   assert.deepEqual(sessions.map((session) => session.id), ['hb_1', 'api_1', 'tg_1']);
+  assert.equal(sessions[1].model, 'qwen3.7-plus');
+  assert.equal(sessions[1].inputTokens, 1200);
+  assert.equal(sessions[1].outputTokens, 340);
+  assert.equal(sessions[1].cacheReadTokens, 50);
+  assert.equal(sessions[1].reasoningTokens, 10);
   const groups = groupSessionsForMenu(sessions, 'api_1');
   assert.deepEqual(groups.map((group) => group.label), ['Hermes Browser Extension', 'API', 'Telegram']);
   assert.equal(groups[1].sessions[0].selected, true);
@@ -899,6 +1146,27 @@ test('context scope menu starts follow-active on page-only prompt tabs', () => {
   assert.match(source, /action === 'follow-active'[\s\S]*unlockContextScope\(\)/, 'Follow active menu action should use the page-only unlock path');
 });
 
+test('tab-attached panels hide follow-active while keeping prompt tab include controls', () => {
+  const source = readFileSync(new URL('../extension/sidepanel.js', import.meta.url), 'utf8');
+  assert.match(source, /function isGlobalPanelResidency\(\)/, 'sidepanel should explicitly know whether it is globally resident');
+  assert.match(source, /if \(isGlobalPanelResidency\(\)\) \{[\s\S]*action: 'follow-active'/, 'Follow Active should only render for keep-open-across-tabs/global panels');
+  assert.match(source, /else if \(contextScope\.mode === CONTEXT_SCOPE_MODES\.FOLLOW_ACTIVE\) \{[\s\S]*syncAttachedPanelContextScope\(\)/, 'tab-attached panels should coerce stale follow-active state to a tab-attached context');
+  assert.match(source, /if \(isGlobalPanelResidency\(\) && contextScope\.mode === CONTEXT_SCOPE_MODES\.PINNED_TAB\) \{[\s\S]*action: 'unlock'/, 'unlock-to-follow should only exist for global keep-open panels');
+  assert.match(source, /els\.contextScopeMenu\.appendChild\(renderContextScopePromptControls\(tabs\)\)/, 'prompt tab include/exclude controls should remain available for tab-attached panels');
+  assert.match(source, /action === 'prompt-tabs-all'[\s\S]*setPromptTabsSelection\(null\)/, 'Include all tabs should still be explicit and available');
+  assert.match(source, /action === 'prompt-tabs-none'[\s\S]*setPromptTabsSelection\(\[\]\)/, 'Page only should still be explicit and available');
+});
+
+test('prompt tab include toggles refresh the list without resetting scroll position', () => {
+  const source = readFileSync(new URL('../extension/sidepanel.js', import.meta.url), 'utf8');
+  assert.match(source, /function rerenderContextScopePromptSelectionPreservingScroll\(/, 'prompt tab updates should preserve internal scrollTop');
+  assert.match(source, /const previousScrollTop = list\.scrollTop/, 'scroll position should be captured before rebuilding tab rows');
+  assert.match(source, /list\.scrollTop = Math\.min\(previousScrollTop, Math\.max\(0, list\.scrollHeight - list\.clientHeight\)\)/, 'scroll restoration should clamp to the new scroll range');
+  assert.match(source, /promptToggle[\s\S]*rerenderContextScopePromptSelectionPreservingScroll\(currentContextScopeSearchQuery\(\)\)/, 'per-tab IN/OUT toggles should not rebuild the whole menu');
+  assert.match(source, /action === 'prompt-tabs-all'[\s\S]*rerenderContextScopePromptSelectionPreservingScroll\(currentContextScopeSearchQuery\(\)/, 'Include All should preserve the visible list position');
+  assert.match(source, /action === 'prompt-tabs-none'[\s\S]*rerenderContextScopePromptSelectionPreservingScroll\(currentContextScopeSearchQuery\(\)/, 'Page Only should preserve the visible list position');
+});
+
 test('sidepanel CSS constrains narrow panel overflow and keeps Hermes scrollbars on overlays', () => {
   const css = readFileSync(new URL('../extension/sidepanel.css', import.meta.url), 'utf8');
   assert.match(css, /html, body \{[\s\S]*?overflow-x:\s*hidden/, 'document should never expose horizontal side-panel scroll');
@@ -1024,6 +1292,8 @@ test('discoverModelsFromRegistry flattens /api/model/options provider inventory'
   assert.equal(result.models[0].reasoning, true);
   assert.equal(result.models[0].fast, true);
   assert.equal(result.models[0].runtimeSelectable, true);
+  const normalized = normalizeHermesModels(result.models, 'openai-codex::gpt-5.5');
+  assert.equal(normalized[0].contextTokens, 272000);
   assert.equal(result.models[2].contextTokens, 1000000);
 });
 

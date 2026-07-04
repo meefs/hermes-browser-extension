@@ -10,6 +10,7 @@ extension/build-info.json
 # Local QA/temp work
 tmp/
 .hermes/
+.gitnexus/
 
 # Private backups and local secrets
 backups/
@@ -31,3 +32,4 @@ Thumbs.db
 .idea/
 
 docs/
+.omx/

@@ -1,5 +1,71 @@
 # Changelog
 
+## v0.1.8 — 2026-07-04
+
+### Active-run chat steering
+- Added active-run chat steering from the composer: while Hermes is running, Enter on a text draft steers the active turn, with explicit Queue/Steer/Stop controls in the busy composer.
+- Wired the Browser side panel to `/v1/runs/{run_id}/steer` for local API mode and `session.steer` over the dashboard WebSocket for remote-dashboard mode.
+- Added a pure `busyComposerSubmitAction()` helper with regressions: text-only active draft + steer available → steer; attachments or no steer → queue; empty → ignore.
+- Added a pure `shouldAutoFlushQueuedTurn()` helper so backend-queued steer fallbacks never auto-send as a normal next prompt.
+- Surfaced backend `steer.queued` events: the draft returns to the composer with an explicit "Steer not injected" status instead of pretending the steer was applied or queueing it for after the turn.
+- Updated steer success copy to "Steer sent to active run" so the Browser stops overpromising when Hermes has no tool injection point in the current turn.
+
+### Live Tool Activity Strip
+- Replaced raw `[tool]` markdown appended to assistant answers with a compact runtime Tool Activity Strip while Hermes streams.
+- Added shared tool-activity helpers that categorize file/edit/terminal/browser/web/media/meta tool names, sanitize previews (secrets, long lines), and respect reduced-motion preferences.
+- New `toolKind` CSS variants for file/edit/terminal/browser/web/media/meta, plus scan/stitch/cursor/reticle/orbit/pixel/stack keyframes for the strip animation.
+
+### Lean chat mode (token budget)
+- Made Fast mode strict opt-in: stored string values such as `"false"`/`"off"` no longer produce `model_options.fast: true` or priority service-tier requests.
+- Hardened `buildHermesModelOptions` so `service_tier` and `fast` are only set when the user actually opts in.
+- `normalizeFastMode` returns a real boolean, never a truthy string.
+
+### Real runtime meter
+- Promoted the runtime payload to a first-class UI meter (Model, Provider, Context, Live 1.24s) in the side panel.
+- Added `applyTurnRuntimePayload()` plumbing on the chat path so the runtime meter reflects the actual server reply instead of local estimates.
+- Session-list refresh no longer overwrites a just-confirmed runtime model/provider with stale session-history data.
+
+### Model catalog + warnings
+- Switched model discovery to prefer the connected Hermes API server's `/api/model/options` catalog before dashboard scraping, with session-history and dashboard fallbacks for older runtimes.
+- Added a static context-length fallback for GPT-5.5 across known providers (openai-codex 272K, openrouter 1.05M) so picker context windows no longer say "unknown".
+- Hardened `/api/model/options` to never call the slow `get_model_context_length` resolver in the per-model loop; provider-aware fallback only.
+
+### Sharper diagnostics
+- Hardened gateway diagnostics so upstream Hermes runtime/tool tracebacks show as connected-with-warning instead of mislabeling the whole Browser connection as unreachable.
+- Added explicit classification for the known Python `NoneType`/`int()` traceback class, with guidance to inspect Hermes logs and run `hermes computer-use doctor` when computer-use/cua-driver appears in the stack.
+- Wired `gpt-image-2-medium` (Codex auth) for the side panel image generator and refined `pairingFailureMessage` for unsupported runtimes.
+
+### Browser behavior settings
+- Folded browser-behavior switches (auto-name sessions, open tabs, page text, selection, panel residency) into intentional settings cards instead of loose checkbox rows.
+- Side-panel CSS hardened: long tab labels, active-tab titles/URLs, pinned scope labels, and bottom model/context controls ellipsize inside narrow panels.
+- Pinned tab/session titles are clipped before session creation so the API title limit is respected.
+
+### Context scope / Chat only
+- Chat only no longer creates a new session or message bucket. It preserves the active conversation scope while disabling page/tab/selection capture for the turn.
+- Added a separate `previousConversationScope` so the session binding and the transcript key both follow the original tab, not the capture mode.
+- Tab-attached panels still allow Include all tabs / Page only / per-tab IN-OUT prompt selection; Follow active tab and Unlock pinned tab are hidden when not relevant.
+- Prompt-tab IN/OUT toggles preserve the internal tab-list `scrollTop` across rerenders.
+- Pinning a tab fresh-fetches it via `chrome.tabs.get(id)` so stale tab snapshots can't cause weird pinning behavior.
+
+### Composer / voice / attachments
+- Voice dictation is capability-gated: Hermes STT when advertised, Browser speech fallback when supported, visible Hermes Voice Dictation extension tab when the side panel mic prompt is suppressed.
+- Microphone permission help links directly to `chrome://settings/content/siteDetails?site=chrome-extension%3A%2F%2F<id>%2F`.
+- Drag/drop attachments and clipboard image paste keep working with the new composer controls.
+- Inline send button moved to the composer right edge next to the voice button; mic is hidden while a run is active.
+
+### Build / packaging / version sync
+- Bumped source, package, root manifest, built `dist/` manifest, and `build-info.json` for v0.1.8.
+- The `scripts/check-manifest.mjs` verifier now fails if root manifest, `extension/manifest.json`, `dist/manifest.json`, or `package.json` are out of sync, preventing the v0.1.5 stale-version bug.
+- Build metadata is stamped into every supported unpacked load root (root, `extension/`, `dist/`) so update checks see the same loaded commit.
+
+### Tests / docs
+- 139/139 tests passing in `npm run verify`.
+- README refreshed for v0.1.8; remote API setup clarified; troubleshooting covers `/health` reachable + runtime warning, native computer-use, and Connect flow.
+- Public release hygiene: docs are public-marketing only; private plans, internal notes, and release-prep docs are gitignored.
+
+### Notes for v0.1.9
+- Plan slot: public support and compatibility hardening. Old-Hermes-version guards, GitHub-label/Discord triage, compatibility matrix, copy-diagnostics UX, and a stable public support playbook.
+
 ## v0.1.7 — 2026-06-30
 
 - Added tab-attached side panel opening by default, with a settings toggle to keep the panel global across tabs when preferred.

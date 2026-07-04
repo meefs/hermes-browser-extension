@@ -33,7 +33,21 @@
       </section>
       <section class="messages" aria-live="polite">
         <article class="message user"><div class="message-role">user</div><div class="message-content">What am I looking at?</div></article>
-        <article class="message assistant"><div class="message-role">Hermes</div><div class="message-content">You are on the Hermes Agent homepage. The page is presenting Hermes as an open-source agent that lives across platforms, remembers context, schedules work, browses the web, and runs in isolated backends.</div></article>
+        <article class="message assistant">
+          <div class="message-role">Hermes</div>
+          <div class="message-content">You are on the Hermes Agent homepage. The page is presenting Hermes as an open-source agent that lives across platforms, remembers context, schedules work, browses the web, and runs in isolated backends.</div>
+          <div class="message-tool-activity">
+            <div class="tool-activity tool-kind-file" role="status" aria-live="polite">
+              <div class="tool-activity-head">
+                <span class="tool-activity-glyph tool-kind-file" aria-hidden="true"></span>
+                <span class="tool-activity-label">Reading file</span>
+                <span class="tool-activity-name">read_file</span>
+              </div>
+              <div class="tool-activity-preview">extension/sidepanel.js · sanitized preview</div>
+              <div class="tool-activity-meter" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+            </div>
+          </div>
+        </article>
       </section>
       <form class="composer">
         <label class="composer-label" for="promptInput">ASK HERMES</label>

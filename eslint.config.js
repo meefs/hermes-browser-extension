@@ -97,6 +97,7 @@ export default [
       'dist/',
       'artifacts/',
       'node_modules/',
+      '.gitnexus/',
       '.hermes/',
       'backups/',
       'tmp/',

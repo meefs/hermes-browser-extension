@@ -57,20 +57,24 @@ export function normalizeContextScope(scope = {}) {
   };
 }
 
-export function tabScopeId(scope = DEFAULT_CONTEXT_SCOPE) {
+export function tabScopeId(scope = DEFAULT_CONTEXT_SCOPE, conversationScope = scope) {
   const normalized = normalizeContextScope(scope);
-  if (normalized.mode === CONTEXT_SCOPE_MODES.CHAT_ONLY) return CONTEXT_SCOPE_MODES.CHAT_ONLY;
+  if (normalized.mode === CONTEXT_SCOPE_MODES.CHAT_ONLY) {
+    const conversation = normalizeContextScope(conversationScope);
+    if (conversation.mode !== CONTEXT_SCOPE_MODES.CHAT_ONLY) return tabScopeId(conversation, conversation);
+    return CONTEXT_SCOPE_MODES.FOLLOW_ACTIVE;
+  }
   return normalized.mode === CONTEXT_SCOPE_MODES.PINNED_TAB && normalized.pinnedTabId !== null
     ? `tab:${normalized.pinnedTabId}`
     : CONTEXT_SCOPE_MODES.FOLLOW_ACTIVE;
 }
 
-export function messageStorageKeyForScope(scope = DEFAULT_CONTEXT_SCOPE) {
-  return `hermesBrowserMessages:${tabScopeId(scope)}`;
+export function messageStorageKeyForScope(scope = DEFAULT_CONTEXT_SCOPE, conversationScope = scope) {
+  return `hermesBrowserMessages:${tabScopeId(scope, conversationScope)}`;
 }
 
-export function sessionBindingKeyForScope(scope = DEFAULT_CONTEXT_SCOPE) {
-  return `hermesBrowserSession:${tabScopeId(scope)}`;
+export function sessionBindingKeyForScope(scope = DEFAULT_CONTEXT_SCOPE, conversationScope = scope) {
+  return `hermesBrowserSession:${tabScopeId(scope, conversationScope)}`;
 }
 
 export function resolveContextTargetTab({ activeTab = null, tabs = [], scope = DEFAULT_CONTEXT_SCOPE } = {}) {

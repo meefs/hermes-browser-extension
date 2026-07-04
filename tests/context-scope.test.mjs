@@ -64,16 +64,20 @@ test('filterPromptTabs keeps selected tab ids only and allows empty selections',
   assert.deepEqual(filterPromptTabs(tabs, normalizeContextScope({ selectedTabIds: null })), tabs, 'explicit null still means include all tabs');
 });
 
-test('chat-only mode resolves no tab and uses chat-only storage keys', () => {
+test('chat-only mode resolves no tab while preserving the active conversation storage scope', () => {
+  const conversationScope = normalizeContextScope({ mode: CONTEXT_SCOPE_MODES.PINNED_TAB, pinnedTabId: 2 });
   const scope = normalizeContextScope({ mode: CONTEXT_SCOPE_MODES.CHAT_ONLY, pinnedTabId: 2, selectedTabIds: [1, 2] });
   assert.equal(scope.mode, CONTEXT_SCOPE_MODES.CHAT_ONLY);
   assert.equal(scope.pinnedTabId, null);
   assert.deepEqual(scope.selectedTabIds, []);
-  assert.equal(tabScopeId(scope), CONTEXT_SCOPE_MODES.CHAT_ONLY);
+  assert.equal(tabScopeId(scope), CONTEXT_SCOPE_MODES.FOLLOW_ACTIVE);
+  assert.equal(tabScopeId(scope, conversationScope), 'tab:2');
   assert.equal(resolveContextTargetTab({ activeTab: tabs[0], tabs, scope }), null);
   assert.deepEqual(filterPromptTabs(tabs, scope), []);
-  assert.equal(messageStorageKeyForScope(scope), 'hermesBrowserMessages:chat-only');
-  assert.equal(sessionBindingKeyForScope(scope), 'hermesBrowserSession:chat-only');
+  assert.equal(messageStorageKeyForScope(scope), 'hermesBrowserMessages:follow-active');
+  assert.equal(sessionBindingKeyForScope(scope), 'hermesBrowserSession:follow-active');
+  assert.equal(messageStorageKeyForScope(scope, conversationScope), 'hermesBrowserMessages:tab:2');
+  assert.equal(sessionBindingKeyForScope(scope, conversationScope), 'hermesBrowserSession:tab:2');
 });
 
 test('chat-only mode does not refresh for tab events', () => {
