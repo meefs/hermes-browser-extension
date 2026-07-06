@@ -1,6 +1,6 @@
 # Security Notes
 
-Hermes Browser Extension v0.1.8 is intentionally read-only.
+Hermes Browser Extension v0.1.9 is intentionally read-only.
 
 ## Current permission model
 
@@ -46,17 +46,17 @@ v0.1 refuses to read:
 
 This is a conservative first pass, not a complete security boundary.
 
-v0.1.8 also redacts sensitive tab titles and URLs before prompt assembly so restricted open tabs do not leak through the open-tabs summary or active-tab prompt fields.
+v0.1.9 also redacts sensitive tab titles and URLs before prompt assembly so restricted open tabs do not leak through the open-tabs summary or active-tab prompt fields.
 
 ## API key / browser token storage
 
-The Hermes API key/browser token is stored in `chrome.storage.local` for the extension. It is masked after save, and v0.1.8 includes **Clear stored token** in Settings.
+The Hermes API key/browser token is stored in `chrome.storage.local` for the extension. It is masked after save, and v0.1.9 includes **Clear stored token** in Settings.
 
 Do not publish screenshots or exported extension storage containing the key.
 
 ## Runtime diagnostics
 
-v0.1.8 can show a connected-with-warning diagnostic when the Hermes API server is reachable but upstream Hermes Agent raises a runtime/tool traceback. These diagnostics are redacted before display and do not grant the extension browser-control permissions.
+v0.1.9 can show a connected-with-warning diagnostic when the Hermes API server is reachable but upstream Hermes Agent raises a runtime/tool traceback. These diagnostics are redacted before display and do not grant the extension browser-control permissions. Copy Diagnostics produces a support block that strips tokens, cookies, page text, selected text, tab titles, and full tab URLs.
 
 ## Related docs
 

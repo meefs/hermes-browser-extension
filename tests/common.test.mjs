@@ -437,12 +437,10 @@ test('manifests expose an Alt+H action shortcut for opening the side panel', () 
   }
 });
 
-test('GitHub CI workflow verifies, lints, and keeps read-only repository permissions', () => {
-  const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
-  assert.match(workflow, /permissions:\s*\n\s*contents:\s*read/);
-  assert.match(workflow, /npm ci/);
-  assert.match(workflow, /npm run verify/);
-  assert.match(workflow, /npm run lint/);
+test('GitHub Actions workflows stay disabled while hosted runners are unavailable', () => {
+  const ignoreRules = readFileSync(new URL('../.gitignore', import.meta.url), 'utf8');
+  assert.match(ignoreRules, /\.github\/workflows\//);
+  assert.match(ignoreRules, /local verification as the release gate/i);
 });
 
 test('remote setup diagnostics UI exposes copyable API-server env guidance', () => {
