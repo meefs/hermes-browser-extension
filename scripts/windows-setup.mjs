@@ -52,6 +52,37 @@ const knownBrowsers = [
 
 const actions = [];
 
+function argSetHas(argSet, flag) {
+  return argSet instanceof Set ? argSet.has(flag) : new Set(argSet || []).has(flag);
+}
+
+export function shouldCopySetupSecretToClipboard(argSet = args) {
+  return argSetHas(argSet, '--clip');
+}
+
+export function secretDisplayValue(secret = '', argSet = args) {
+  if (!argSetHas(argSet, '--show-secret')) return '[REDACTED]';
+  return secret || '(none)';
+}
+
+function recordSkippedSecretCopy(id, reason = 'no-clip-flag') {
+  actions.push({ id, command: 'clip.exe', args: ['<redacted>'], skipped: true, reason, dryRun });
+}
+
+export function resolveWindowsClipPath({
+  env = process.env,
+  platform = process.platform,
+  existsSync = fs.existsSync,
+} = {}) {
+  if (platform !== 'win32') return { ok: false, reason: 'not-windows' };
+  const roots = [env.SystemRoot, env.WINDIR, 'C:\\Windows'].filter(Boolean);
+  for (const root of roots) {
+    const candidate = path.join(root, 'System32', 'clip.exe');
+    if (existsSync(candidate)) return { ok: true, path: candidate };
+  }
+  return { ok: false, reason: 'clip-not-found', path: path.join(roots[0] || 'C:\\Windows', 'System32', 'clip.exe') };
+}
+
 function envJoin(parts) {
   const [envName, ...rest] = parts;
   const base = process.env[envName];
@@ -194,10 +225,11 @@ function readApiServerKey() {
 }
 
 function copySecretToClipboard(secret, label) {
-  actions.push({ id: label, command: 'clip', args: ['<redacted>'], dryRun });
+  const clip = resolveWindowsClipPath();
+  actions.push({ id: label, command: clip.path || 'clip.exe', args: ['<redacted>'], dryRun });
   if (dryRun) return true;
-  if (!secret) return false;
-  const result = spawnSync('clip', { input: secret, encoding: 'utf8', windowsHide: true });
+  if (!secret || !clip.ok) return false;
+  const result = spawnSync(clip.path, { input: secret, encoding: 'utf8', windowsHide: true });
   return result.status === 0;
 }
 
@@ -231,16 +263,29 @@ async function main() {
   }
 
   const pairing = await probePairing();
+  const useClip = shouldCopySetupSecretToClipboard(args);
   let copiedFallbackKey = false;
   if (pairing.token) {
-    copiedFallbackKey = copySecretToClipboard(pairing.token, 'copy-pairing-token-to-clipboard');
+    if (useClip) {
+      copiedFallbackKey = copySecretToClipboard(pairing.token, 'copy-pairing-token-to-clipboard');
+    } else {
+      recordSkippedSecretCopy('copy-pairing-token-to-clipboard');
+    }
   } else if (pairing.manualSetup) {
     if (dryRun) {
-      actions.push({ id: 'copy-api-server-key-fallback-to-clipboard', command: 'clip', args: ['<redacted>'], dryRun });
+      if (useClip) {
+        actions.push({ id: 'copy-api-server-key-fallback-to-clipboard', command: resolveWindowsClipPath().path || 'clip.exe', args: ['<redacted>'], dryRun });
+      } else {
+        recordSkippedSecretCopy('copy-api-server-key-fallback-to-clipboard');
+      }
       pairing.fallback = { envFile: path.join(os.homedir(), '.hermes', '.env'), reason: 'dry-run', copied: false };
     } else {
       const key = readApiServerKey();
-      copiedFallbackKey = copySecretToClipboard(key.key, 'copy-api-server-key-fallback-to-clipboard');
+      if (useClip) {
+        copiedFallbackKey = copySecretToClipboard(key.key, 'copy-api-server-key-fallback-to-clipboard');
+      } else {
+        recordSkippedSecretCopy('copy-api-server-key-fallback-to-clipboard');
+      }
       pairing.fallback = { envFile: key.envFile, reason: key.reason, copied: copiedFallbackKey };
     }
   }
@@ -272,22 +317,33 @@ async function main() {
     console.log(`- Built dist: ${distDir}`);
     console.log(`- Extensions page: ${summary.browser.extensionsUrl}`);
     if (pairing.manualSetup) {
-      console.log(copiedFallbackKey
-        ? '- Pairing endpoint unavailable; copied API_SERVER_KEY fallback to clipboard. Paste it into Settings → API key.'
-        : '- Pairing endpoint unavailable and API_SERVER_KEY fallback could not be copied. Use Copy_Hermes_Browser_API_Key.cmd manually.');
-    } else {
+      const fallbackKey = dryRun ? '' : readApiServerKey().key;
+      if (copiedFallbackKey) {
+        console.log('- Pairing endpoint unavailable; copied API_SERVER_KEY fallback to clipboard. Paste it into Settings → API key.');
+      } else if (args.has('--show-secret')) {
+        console.log(`- Pairing endpoint unavailable. API_SERVER_KEY fallback: ${secretDisplayValue(fallbackKey, args)}`);
+      } else {
+        console.log('- Pairing endpoint unavailable. API_SERVER_KEY fallback was not copied or printed. Re-run with --clip to copy it, or --show-secret to print it in this terminal on a trusted machine.');
+      }
+    } else if (copiedFallbackKey) {
       console.log('- Pairing token copied to clipboard. Paste it into Settings → API key if the extension did not auto-connect.');
+    } else if (args.has('--show-secret')) {
+      console.log(`- Pairing token: ${secretDisplayValue(pairing.token, args)}\n  Paste this token into Settings → API key if the extension did not auto-connect.`);
+    } else {
+      console.log('- Pairing token was not copied or printed. Re-run with --clip to copy it, or --show-secret to print it in this terminal on a trusted machine.');
     }
     console.log('Load/reload the unpacked extension from dist/.');
   }
 }
 
-main().catch((error) => {
-  if (json) {
-    process.stdout.write(JSON.stringify({ ok: false, error: error.message, actions }, null, 2));
-    process.stdout.write('\n');
-  } else {
-    console.error(error.message);
-  }
-  process.exit(1);
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    if (json) {
+      process.stdout.write(JSON.stringify({ ok: false, error: error.message, actions }, null, 2));
+      process.stdout.write('\n');
+    } else {
+      console.error(error.message);
+    }
+    process.exit(1);
+  });
+}

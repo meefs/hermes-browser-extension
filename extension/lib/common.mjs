@@ -1669,6 +1669,21 @@ export function normalizeHermesProfiles(payload = {}, selectedProfile = '') {
     });
 }
 
+function decodedUrlPart(value = '') {
+  const normalized = String(value || '').replace(/\+/g, ' ');
+  try {
+    return decodeURIComponent(normalized);
+  } catch {
+    return normalized.replace(/%([0-9a-fA-F]{2})/g, (_match, hex) => String.fromCharCode(Number.parseInt(hex, 16)));
+  }
+}
+
+function restrictedUrlHaystack(parsed) {
+  const rawParts = [parsed.hostname, parsed.pathname, parsed.search, parsed.hash];
+  const decodedParts = rawParts.map(decodedUrlPart);
+  return [...rawParts, ...decodedParts].join(' ');
+}
+
 export function isRestrictedUrl(url = '') {
   if (!url) return true;
   let parsed;
@@ -1678,7 +1693,7 @@ export function isRestrictedUrl(url = '') {
     return true;
   }
   if (RESTRICTED_SCHEMES.has(parsed.protocol)) return true;
-  const haystack = `${parsed.hostname}${parsed.pathname}`;
+  const haystack = restrictedUrlHaystack(parsed);
   return SENSITIVE_URL_PATTERNS.some((pattern) => pattern.test(haystack));
 }
 

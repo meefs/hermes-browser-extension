@@ -373,12 +373,23 @@ test('isRestrictedUrl blocks browser internals and sensitive account categories'
   assert.equal(isRestrictedUrl('chrome://extensions'), true);
   assert.equal(isRestrictedUrl('https://mybank.example.com/accounts'), true);
   assert.equal(isRestrictedUrl('https://github.com/NousResearch/hermes-agent'), false);
+  assert.equal(isRestrictedUrl('https://example.com/search?q=mybank'), true);
+  assert.equal(isRestrictedUrl('https://example.com/dashboard#wallet'), true);
+  assert.equal(isRestrictedUrl('https://example.com/docs?next=%2Fbilling'), true);
+  assert.equal(isRestrictedUrl('https://example.com/docs?q=my%62ank'), true);
+  assert.equal(isRestrictedUrl('https://example.com/docs#%77allet'), true);
+  assert.equal(isRestrictedUrl('https://example.com/%62ank'), true);
+  assert.equal(isRestrictedUrl('https://example.com/search?q=my%62ank%'), true);
 });
 
 test('privacySafeTabForPrompt redacts sensitive tab titles and URLs before prompt assembly', () => {
   const sensitive = privacySafeTabForPrompt({ title: 'My Bank · Account 1234', url: 'https://mybank.example.com/accounts/1234' });
   assert.equal(sensitive.title, '(restricted tab)');
   assert.equal(sensitive.url, '(omitted by privacy guard)');
+
+  const queryOnlySensitive = privacySafeTabForPrompt({ title: 'Normal Search', url: 'https://example.com/search?q=my%62ank' });
+  assert.equal(queryOnlySensitive.title, '(restricted tab)');
+  assert.equal(queryOnlySensitive.url, '(omitted by privacy guard)');
 
   const summary = summarizeTabs([
     { title: 'My Bank · Account 1234', url: 'https://mybank.example.com/accounts/1234', active: true },

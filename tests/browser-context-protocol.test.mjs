@@ -81,6 +81,32 @@ test('browserContextPayloadHash is deterministic and privacy-safe for restricted
   assert.equal(first, second);
 });
 
+
+test('Browser Context Protocol restricts sensitive query and hash URL fragments', () => {
+  const payload = buildBrowserContextPayload({
+    activeTab: { id: 1, title: 'Search Result', url: 'https://example.com/search?q=my%62ank' },
+    tabs: [
+      { id: 1, active: true, title: 'Search Result', url: 'https://example.com/search?q=my%62ank' },
+      { id: 2, title: 'Docs Hash', url: 'https://example.com/docs#%77allet' },
+      { id: 3, title: 'Encoded Path', url: 'https://example.com/%62ank' },
+      { id: 4, title: 'Malformed Query', url: 'https://example.com/search?q=my%62ank%' },
+      { id: 5, title: 'Public Docs', url: 'https://example.com/docs/browser-context' },
+    ],
+    selectedTabs: [{ id: 2, title: 'Docs Hash', url: 'https://example.com/docs#%77allet' }],
+    pageContext: { selectedText: '', text: '' },
+    settings: BASE_SETTINGS,
+  });
+
+  assert.equal(payload.activeTab.title, '(restricted tab)');
+  assert.equal(payload.activeTab.url, '(omitted by privacy guard)');
+  assert.equal(payload.tabs[0].title, '(restricted tab)');
+  assert.equal(payload.tabs[1].title, '(restricted tab)');
+  assert.equal(payload.tabs[2].title, '(restricted tab)');
+  assert.equal(payload.tabs[3].title, '(restricted tab)');
+  assert.equal(payload.tabs[4].title, 'Public Docs');
+  assert.equal(payload.selectedTabs[0].url, '(omitted by privacy guard)');
+});
+
 test('buildBrowserContextPrompt preserves existing untrusted-context prompt boundaries', () => {
   const prompt = buildBrowserContextPrompt({
     userText: 'Summarize this',

@@ -28,10 +28,98 @@ function readEnvFileValue(name) {
   return match?.[1]?.trim() || '';
 }
 
-function githubToken(env = process.env) {
+function normalizedExecutableExtensions(command, { platform = process.platform, pathext = process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD;.PS1' } = {}) {
+  if (platform !== 'win32' || path.extname(command)) return [''];
+  const entries = String(pathext || '')
+    .split(';')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean)
+    .map((entry) => entry.startsWith('.') ? entry : `.${entry}`);
+  return ['', ...entries, '.exe', '.com', '.cmd', '.bat', '.ps1', '.lnk'];
+}
+
+function uniqueCaseInsensitive(values) {
+  const seen = new Set();
+  return values.filter((value) => {
+    const key = String(value || '').toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function pathInsideOrEqual(child, parent, platform = process.platform) {
+  const normalizedChild = path.resolve(child);
+  const normalizedParent = path.resolve(parent);
+  const childKey = platform === 'win32' ? normalizedChild.toLowerCase() : normalizedChild;
+  const parentKey = platform === 'win32' ? normalizedParent.toLowerCase() : normalizedParent;
+  const relative = path.relative(parentKey, childKey);
+  return relative === '' || (relative && !relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+export function cwdGhBinaryRisk({
+  cwd = process.cwd(),
+  platform = process.platform,
+  pathext = process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD;.PS1',
+  existsSync = fs.existsSync,
+} = {}) {
+  if (platform !== 'win32') return { blocked: false };
+  const extensions = uniqueCaseInsensitive(normalizedExecutableExtensions('gh', { platform, pathext }));
+  for (const ext of extensions) {
+    const candidate = path.join(cwd, `gh${ext}`);
+    if (existsSync(candidate)) return { blocked: true, path: candidate, reason: 'cwd-gh-binary' };
+  }
+  return { blocked: false };
+}
+
+export function resolveGhBinary({
+  cwd = process.cwd(),
+  env = process.env,
+  platform = process.platform,
+  pathext = env.PATHEXT || '.COM;.EXE;.BAT;.CMD;.PS1',
+  pathValue = env.PATH || '',
+  existsSync = fs.existsSync,
+  realpathSyncFn = fs.realpathSync.native || fs.realpathSync,
+} = {}) {
+  if (platform !== 'win32') return { ok: true, path: 'gh' };
+  const cwdRisk = cwdGhBinaryRisk({ cwd, platform, pathext, existsSync });
+  if (cwdRisk.blocked) return { ok: false, blocked: true, reason: cwdRisk.reason, path: cwdRisk.path };
+
+  const extensions = uniqueCaseInsensitive(normalizedExecutableExtensions('gh', { platform, pathext }));
+  const delimiter = platform === 'win32' ? ';' : path.delimiter;
+  for (const rawEntry of String(pathValue || '').split(delimiter)) {
+    const entry = rawEntry.trim();
+    if (!entry || !path.isAbsolute(entry)) {
+      return { ok: false, blocked: true, reason: 'unsafe-path-entry', pathEntry: rawEntry };
+    }
+    for (const ext of extensions) {
+      const candidate = path.join(entry, `gh${ext}`);
+      if (!existsSync(candidate)) continue;
+      let realCandidate;
+      try {
+        realCandidate = realpathSyncFn(candidate);
+      } catch {
+        realCandidate = candidate;
+      }
+      if (pathInsideOrEqual(realCandidate, cwd, platform)) {
+        return { ok: false, blocked: true, reason: 'resolved-gh-under-cwd', path: realCandidate };
+      }
+      return { ok: true, path: realCandidate };
+    }
+  }
+  return { ok: false, reason: 'gh-not-found' };
+}
+
+export function githubToken(env = process.env, options = {}) {
   if (env.GITHUB_TOKEN) return env.GITHUB_TOKEN;
+  const resolvedGh = resolveGhBinary({ env, ...options });
+  if (resolvedGh.blocked) {
+    throw new Error(`Refusing to execute gh: ${resolvedGh.reason}`);
+  }
+  if (!resolvedGh.ok) return '';
   try {
-    return execFileSync('gh', ['auth', 'token'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const execFileSyncFn = options.execFileSyncFn || execFileSync;
+    return execFileSyncFn(resolvedGh.path, ['auth', 'token'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
   } catch {
     return '';
   }
