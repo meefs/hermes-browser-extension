@@ -5,6 +5,11 @@ import {
   PANEL_RESIDENCY_MODES,
 } from './lib/panel-residency.mjs';
 import {
+  detectBrowserId,
+  openNativeSidebar,
+  setActionClickPanelBehavior as setPanelBehaviorForBrowser,
+} from './lib/browser-runtime.mjs';
+import {
   normalizeTranscriptPayload,
   parseTimedTextXml,
   parseYoutubeJson3,
@@ -37,8 +42,7 @@ async function refreshPanelResidencyModeFromStorage() {
 }
 
 async function setActionClickSidePanelBehavior() {
-  if (!chrome.sidePanel?.setPanelBehavior) return;
-  await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+  await setPanelBehaviorForBrowser();
 }
 
 async function activeBrowserTabId() {
@@ -89,6 +93,8 @@ async function configureSidePanel() {
   try {
     const panelResidencyMode = await refreshPanelResidencyModeFromStorage();
     const tabId = await activeBrowserTabId();
+    // No popup for any browser — background.js handles the click.
+    await chrome.action.setPopup({ popup: '' });
     await applyPanelResidencyMode(panelResidencyMode, { tabId });
   } catch (error) {
     console.warn('[Hermes Browser] Unable to set side panel behavior:', error);
@@ -111,7 +117,14 @@ async function openHermesPanel(tab) {
     tabId: useTabAttached ? tabId : null,
     defaultPath: defaultPanelPath,
   });
+
+  // Try Opera/Firefox native sidebar first.
+  const opened = await openNativeSidebar({ windowId: tab?.windowId ?? null });
+  if (opened) return;
+
+  // Chrome/Edge/Comet sidePanel API
   const sidePanelCanOpen = Boolean(chrome.sidePanel?.open);
+  const browserId = detectBrowserId();
 
   try {
     if (sidePanelCanOpen) {
@@ -136,9 +149,28 @@ async function openHermesPanel(tab) {
     }
   } catch (error) {
     console.warn('[Hermes Browser] Side panel open failed:', error);
-    if (sidePanelCanOpen) return;
   }
 
+  // Opera/Firefox: open as a narrow popup window that acts like a sidebar panel.
+  // Opera's sidebarAction API is not available in MV3, so we use windows.create
+  // with type: popup, a narrow width, and leftmost position.
+  if (browserId === 'opera' || browserId === 'firefox') {
+    try {
+      await chrome.windows.create({
+        url: chrome.runtime.getURL(panelPath),
+        type: 'popup',
+        width: 420,
+        height: 800,
+        left: 0,
+        top: 0,
+      });
+      return;
+    } catch (popupError) {
+      console.warn('[Hermes Browser] Popup window creation failed:', popupError);
+    }
+  }
+
+  // Last resort: open as extension tab
   await chrome.tabs.create({ url: chrome.runtime.getURL(panelPath) });
 }
 

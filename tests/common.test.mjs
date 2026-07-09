@@ -1418,8 +1418,9 @@ test('panel residency setting is present in defaults and settings UI copy', () =
 
 test('background keeps action-click side panel opening while applying tab-attached residency', () => {
   const source = readFileSync(new URL('../extension/background.js', import.meta.url), 'utf8');
-  assert.match(source, /openPanelOnActionClick:\s*true/);
-  assert.doesNotMatch(source, /openPanelOnActionClick:\s*false/);
+  const runtimeSource = readFileSync(new URL('../extension/lib/browser-runtime.mjs', import.meta.url), 'utf8');
+  assert.match(runtimeSource, /openPanelOnActionClick:\s*true/);
+  assert.doesNotMatch(runtimeSource, /openPanelOnActionClick:\s*false/);
   assert.match(source, /setOptions\(\{\s*enabled:\s*false\s*\}\)/);
   assert.match(source, /sidePanel\.setOptions\(\{[\s\S]*tabId/);
   assert.match(source, /sidePanel\.open\(\{\s*tabId/);
@@ -1427,7 +1428,8 @@ test('background keeps action-click side panel opening while applying tab-attach
   assert.match(source, /sidePanel\.open\(\{\s*tabId\s*\}\);[\s\S]*catch \(tabOpenError\)[\s\S]*sidePanel\.open\(\{\s*windowId\s*\}\)/);
   assert.match(source, /configureSidePanel[\s\S]*activeBrowserTabId\(\)[\s\S]*applyPanelResidencyMode/);
   assert.match(source, /tabs\?\.onActivated\?\.addListener\?\.[\s\S]*reapplyPanelResidencyForTab/);
-  assert.match(source, /if \(sidePanelCanOpen\) return;[\s\S]*tabs\.create/);
+  assert.match(source, /windows\.create/);
+  assert.match(source, /type: 'popup'/);
   assert.doesNotMatch(source, /open\(\{\s*windowId: tab\.windowId\s*\}\);\s*return;/);
   assert.doesNotMatch(source, /Side panel open failed, falling back to extension tab/);
 });
